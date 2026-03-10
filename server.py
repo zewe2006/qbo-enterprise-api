@@ -1025,6 +1025,7 @@ class ReportParams(BaseModel):
     compare_prior_year: Optional[bool] = False
     compare_prior_month: Optional[bool] = False
     company_id: Optional[str] = None  # specific company UUID | "all" for consolidated
+    company_ids: Optional[list] = None  # list of company UUIDs for multi-select consolidated
 
 
 @app.post("/api/reports/profit-loss")
@@ -1040,12 +1041,17 @@ async def get_profit_loss(params: ReportParams):
 
 
 async def _get_live_consolidated(params, qbo_report_name, report_type):
-    """Pull live reports from all connected companies and merge them."""
+    """Pull live reports from selected (or all) connected companies and merge them."""
     db = get_db()
     companies = db.execute(
         "SELECT id, name, qbo_realm_id, refresh_token FROM companies WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != ''"
     ).fetchall()
     db.close()
+
+    # Filter by selected company_ids if provided
+    if params.company_ids and len(params.company_ids) > 0:
+        selected = set(params.company_ids)
+        companies = [c for c in companies if c["id"] in selected]
 
     if not companies:
         return {"current": None, "consolidated": True, "companies": [], "message": "No connected companies. Connect and sync companies first."}
@@ -1231,6 +1237,10 @@ def _get_cached_report(params, report_type):
 
     if params.company_id == "all":
         rows, matched_key = _find_rows_consolidated(report_type, fallback_keys)
+        # Filter by company_ids if provided
+        if params.company_ids and len(params.company_ids) > 0:
+            selected = set(params.company_ids)
+            rows = [r for r in rows if r["company_id"] in selected]
         db.close()
 
         if not rows:
