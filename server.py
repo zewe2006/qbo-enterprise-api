@@ -69,7 +69,11 @@ FRONTEND_ORIGIN = os.environ.get(
 # ---------- Database ----------
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "qbo_enterprise.db")
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+# DATA_DIR: look for data/ next to server.py first, then one level up (for local dev with api/ subfolder)
+_here = os.path.dirname(__file__)
+DATA_DIR = os.path.join(_here, "data")
+if not os.path.isdir(DATA_DIR):
+    DATA_DIR = os.path.join(os.path.dirname(_here), "data")
 
 
 def get_db():
