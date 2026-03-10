@@ -1030,16 +1030,63 @@ class ReportParams(BaseModel):
 @app.post("/api/reports/profit-loss")
 async def get_profit_loss(params: ReportParams):
     if params.company_id == "all":
-        return _get_cached_report(params, "profit_loss")
+        result = _get_cached_report(params, "profit_loss")
+        if result.get("current") is None:
+            result = await _get_live_consolidated(params, "ProfitAndLoss", "profit_loss")
+        return result
     if params.company_id:
         return await _get_live_report_for_company(params, "ProfitAndLoss", "profit_loss")
     return {"current": None, "message": "Select a company"}
 
 
+async def _get_live_consolidated(params, qbo_report_name, report_type):
+    """Pull live reports from all connected companies and merge them."""
+    db = get_db()
+    companies = db.execute(
+        "SELECT id, name, qbo_realm_id, refresh_token FROM companies WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != ''"
+    ).fetchall()
+    db.close()
+
+    if not companies:
+        return {"current": None, "consolidated": True, "companies": [], "message": "No connected companies. Connect and sync companies first."}
+
+    reports = []
+    company_names = []
+    for company in companies:
+        try:
+            result = await _get_live_report_for_company(
+                ReportParams(
+                    start_date=params.start_date,
+                    end_date=params.end_date,
+                    date_macro=params.date_macro,
+                    accounting_method=params.accounting_method,
+                    compare_prior_year=params.compare_prior_year,
+                    compare_prior_month=params.compare_prior_month,
+                    company_id=company["id"],
+                ),
+                qbo_report_name,
+                report_type,
+            )
+            if result.get("current"):
+                reports.append(result["current"])
+                company_names.append({"name": company["name"], "company_id": company["id"]})
+        except Exception:
+            pass
+
+    if not reports:
+        return {"current": None, "consolidated": True, "companies": [], "message": "Could not pull live data from any company."}
+
+    merged = _merge_reports(reports)
+    return {"current": merged, "consolidated": True, "companies": company_names}
+
+
 @app.post("/api/reports/balance-sheet")
 async def get_balance_sheet(params: ReportParams):
     if params.company_id == "all":
-        return _get_cached_report(params, "balance_sheet")
+        result = _get_cached_report(params, "balance_sheet")
+        if result.get("current") is None:
+            result = await _get_live_consolidated(params, "BalanceSheet", "balance_sheet")
+        return result
     if params.company_id:
         return await _get_live_report_for_company(params, "BalanceSheet", "balance_sheet")
     return {"current": None, "message": "Select a company"}
@@ -1048,7 +1095,10 @@ async def get_balance_sheet(params: ReportParams):
 @app.post("/api/reports/cash-flow")
 async def get_cash_flow(params: ReportParams):
     if params.company_id == "all":
-        return _get_cached_report(params, "cash_flow")
+        result = _get_cached_report(params, "cash_flow")
+        if result.get("current") is None:
+            result = await _get_live_consolidated(params, "CashFlow", "cash_flow")
+        return result
     if params.company_id:
         return await _get_live_report_for_company(params, "CashFlow", "cash_flow")
     return {"current": None, "message": "Select a company"}
@@ -1141,12 +1191,18 @@ def _get_cached_report(params, report_type):
         "Last Month": f"{year}-last-month",
         "This Fiscal Year-to-date": f"{year}-ytd",
         "This Fiscal Year": f"{year}-ytd",
+        "This Fiscal Quarter": f"{year}-qtd",
+        "Last Fiscal Quarter": f"{year}-last-quarter",
+        "This Fiscal Quarter-to-date": f"{year}-qtd",
+        "Last Fiscal Year": f"{year - 1}-full",
         "Today": f"{year}-current",
     }
     period_key = macro_map.get(params.date_macro or "", f"{year}-ytd")
+    # Build fallback chain: exact match → ytd → mtd → any available
     fallback_keys = [period_key]
-    if period_key != f"{year}-ytd":
-        fallback_keys.append(f"{year}-ytd")
+    for fb in [f"{year}-ytd", f"{year}-mtd", f"{year}-last-month"]:
+        if fb not in fallback_keys:
+            fallback_keys.append(fb)
 
     def _find_rows_consolidated(rt, keys):
         for pk in keys:
