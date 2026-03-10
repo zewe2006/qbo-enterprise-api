@@ -1,0 +1,102 @@
+{
+  "CompanyInfo": {
+    "CompanyName": "Food Terminal",
+    "LegalName": "FARM NOODLE INC.",
+    "CompanyAddr": {
+      "Id": "1",
+      "Line1": "5000 Buford Hwy NE B201",
+      "City": "Chamblee",
+      "Country": "USA",
+      "CountrySubDivisionCode": "GA",
+      "PostalCode": "30341"
+    },
+    "CustomerCommunicationAddr": {
+      "Id": "1133",
+      "Line1": "5000 Buford Hwy NE B201",
+      "City": "Chamblee",
+      "Country": "USA",
+      "CountrySubDivisionCode": "GA",
+      "PostalCode": "30341"
+    },
+    "LegalAddr": {
+      "Id": "1",
+      "Line1": "5000 Buford Hwy NE B201",
+      "City": "Chamblee",
+      "Country": "USA",
+      "CountrySubDivisionCode": "GA",
+      "PostalCode": "30341"
+    },
+    "CustomerCommunicationEmailAddr": {
+      "Address": "catering@foodterminal.com"
+    },
+    "PrimaryPhone": {
+      "FreeFormNumber": "+16783536110"
+    },
+    "CompanyStartDate": "2019-07-16",
+    "FiscalYearStartMonth": "January",
+    "Country": "US",
+    "Email": {
+      "Address": "zewe2006@gmail.com"
+    },
+    "WebAddr": {
+      "URI": "www.foodterminal.com"
+    },
+    "SupportedLanguages": "en",
+    "DefaultTimeZone": "America/Los_Angeles",
+    "NameValue": [
+      {
+        "Name": "NonTracking",
+        "Value": "false"
+      },
+      {
+        "Name": "IsQbdtMigrated",
+        "Value": "false"
+      },
+      {
+        "Name": "IndustryType",
+        "Value": "Full-service restaurants"
+      },
+      {
+        "Name": "IndustryCode",
+        "Value": "722511"
+      },
+      {
+        "Name": "SubscriptionStatus",
+        "Value": "SUBSCRIBED"
+      },
+      {
+        "Name": "OfferingSku",
+        "Value": "QuickBooks Online Essentials"
+      },
+      {
+        "Name": "PayrollFeature",
+        "Value": "false"
+      },
+      {
+        "Name": "AccountantFeature",
+        "Value": "false"
+      },
+      {
+        "Name": "QBOIndustryType",
+        "Value": "Manufacturing Businesses"
+      },
+      {
+        "Name": "ItemCategoriesFeature",
+        "Value": "true"
+      },
+      {
+        "Name": "AssignedTime",
+        "Value": "2019-07-16T10:43:43-07:00"
+      }
+    ],
+    "domain": "QBO",
+    "sparse": false,
+    "Id": "1",
+    "SyncToken": "175",
+    "MetaData": {
+      "CreateTime": "2019-07-16T09:43:43-07:00",
+      "LastUpdatedTime": "2025-06-16T13:25:13-07:00"
+    }
+  },
+  "time": "2026-03-10T12:18:52.702-07:00"
+}

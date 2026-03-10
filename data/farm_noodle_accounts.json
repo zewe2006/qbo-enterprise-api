@@ -1,0 +1,3662 @@
+{
+  "QueryResponse": {
+    "Account": [
+      {
+        "Name": "A/C",
+        "SubAccount": false,
+        "FullyQualifiedName": "A/C",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 3484438.29,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "70",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-08-02T13:15:52-07:00",
+          "LastUpdatedTime": "2026-03-03T10:30:52-08:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing - Amy",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing - Amy",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 1302939.88,
+        "CurrentBalanceWithSubAccounts": 1302939.88,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "100",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-11-22T08:37:37-08:00",
+          "LastUpdatedTime": "2026-03-03T10:30:52-08:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing - Bree",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing - Bree",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 125572,
+        "CurrentBalanceWithSubAccounts": 125572,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "81",
+        "SyncToken": "2",
+        "MetaData": {
+          "CreateTime": "2019-08-02T20:12:15-07:00",
+          "LastUpdatedTime": "2022-09-02T10:01:46-07:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing - Gim Tan",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing - Gim Tan",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 9000,
+        "CurrentBalanceWithSubAccounts": 9000,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "71",
+        "SyncToken": "2",
+        "MetaData": {
+          "CreateTime": "2019-08-02T13:16:25-07:00",
+          "LastUpdatedTime": "2022-09-12T08:57:54-07:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing - Helena",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing - Helena",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 12000,
+        "CurrentBalanceWithSubAccounts": 12000,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "72",
+        "SyncToken": "2",
+        "MetaData": {
+          "CreateTime": "2019-08-02T13:18:01-07:00",
+          "LastUpdatedTime": "2020-08-17T14:09:24-07:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing - Howie",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing - Howie",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 180343.5,
+        "CurrentBalanceWithSubAccounts": 180343.5,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "120",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-09-01T08:42:41-07:00",
+          "LastUpdatedTime": "2026-02-28T00:46:53-08:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing - Jane",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing - Jane",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 259529.54,
+        "CurrentBalanceWithSubAccounts": 259529.54,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "94",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-09-04T09:16:21-07:00",
+          "LastUpdatedTime": "2026-03-03T10:27:41-08:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing - Kuang",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing - Kuang",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 24000,
+        "CurrentBalanceWithSubAccounts": 24000,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "76",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-08-02T13:27:25-07:00",
+          "LastUpdatedTime": "2020-08-17T14:11:36-07:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing - Patrick",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing - Patrick",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 636636.79,
+        "CurrentBalanceWithSubAccounts": 636636.79,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "74",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-08-02T13:25:45-07:00",
+          "LastUpdatedTime": "2023-08-15T13:28:03-07:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing - Tong Song Leong",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing - Tong Song Leong",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 1500,
+        "CurrentBalanceWithSubAccounts": 1500,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "102",
+        "SyncToken": "2",
+        "MetaData": {
+          "CreateTime": "2019-12-02T10:18:13-08:00",
+          "LastUpdatedTime": "2020-08-17T14:16:30-07:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing Anh Nguyen",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing Anh Nguyen",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 6000,
+        "CurrentBalanceWithSubAccounts": 6000,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "73",
+        "SyncToken": "2",
+        "MetaData": {
+          "CreateTime": "2019-08-02T13:24:11-07:00",
+          "LastUpdatedTime": "2020-08-17T14:10:28-07:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing Bruce Zhang",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing Bruce Zhang",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 2250,
+        "CurrentBalanceWithSubAccounts": 2250,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "106",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2020-01-09T08:59:58-08:00",
+          "LastUpdatedTime": "2020-08-17T14:10:49-07:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing Xiang Cindy Chen",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing Xiang Cindy Chen",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 4500,
+        "CurrentBalanceWithSubAccounts": 4500,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "75",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-08-02T13:26:42-07:00",
+          "LastUpdatedTime": "2020-08-17T14:09:46-07:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing- Keong Tan",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing- Keong Tan",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 1500,
+        "CurrentBalanceWithSubAccounts": 1500,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "77",
+        "SyncToken": "2",
+        "MetaData": {
+          "CreateTime": "2019-08-02T13:28:33-07:00",
+          "LastUpdatedTime": "2020-08-17T14:10:03-07:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing- Rachel and Tao",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "70"
+        },
+        "FullyQualifiedName": "A/C:A/C Drawing- Rachel and Tao",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 918666.58,
+        "CurrentBalanceWithSubAccounts": 918666.58,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "93",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-09-03T10:48:12-07:00",
+          "LastUpdatedTime": "2025-12-03T09:47:24-08:00"
+        }
+      },
+      {
+        "Name": "A/C Drawing - Cecilia",
+        "SubAccount": false,
+        "FullyQualifiedName": "A/C Drawing - Cecilia",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "DeferredRevenue",
+        "CurrentBalance": 6000,
+        "CurrentBalanceWithSubAccounts": 6000,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "143",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2022-04-13T15:06:30-07:00",
+          "LastUpdatedTime": "2022-04-13T15:06:33-07:00"
+        }
+      },
+      {
+        "Name": "Accounts Payable (A/P)",
+        "SubAccount": false,
+        "FullyQualifiedName": "Accounts Payable (A/P)",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Accounts Payable",
+        "AccountSubType": "AccountsPayable",
+        "CurrentBalance": -183808.44,
+        "CurrentBalanceWithSubAccounts": -183808.44,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "60",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-29T14:17:40-07:00",
+          "LastUpdatedTime": "2026-03-05T09:07:54-08:00"
+        }
+      },
+      {
+        "Name": "Accounts Receivable (A/R)",
+        "SubAccount": false,
+        "FullyQualifiedName": "Accounts Receivable (A/R)",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Accounts Receivable",
+        "AccountSubType": "AccountsReceivable",
+        "CurrentBalance": 5441.53,
+        "CurrentBalanceWithSubAccounts": 5441.53,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "59",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-27T13:07:15-07:00",
+          "LastUpdatedTime": "2026-02-18T05:03:29-08:00"
+        }
+      },
+      {
+        "Name": "Advertising & Marketing",
+        "SubAccount": false,
+        "Description": "Ads, business cards, and other marketing costs",
+        "FullyQualifiedName": "Advertising & Marketing",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "AdvertisingPromotional",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "3",
+        "SyncToken": "2",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2026-03-05T15:21:31-08:00"
+        }
+      },
+      {
+        "Name": "Online Order Marketing",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "3"
+        },
+        "FullyQualifiedName": "Advertising & Marketing:Online Order Marketing",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "AdvertisingPromotional",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "1150040005",
+        "SyncToken": "2",
+        "MetaData": {
+          "CreateTime": "2025-06-06T11:35:22-07:00",
+          "LastUpdatedTime": "2026-03-05T15:21:31-08:00"
+        }
+      },
+      {
+        "Name": "Ask My Accountant",
+        "SubAccount": false,
+        "Description": "Flagged to review with your accountant.",
+        "FullyQualifiedName": "Ask My Accountant",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "Utilities",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "20",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Bank Charges & Fees",
+        "SubAccount": false,
+        "Description": "Fees or charges from your bank or credit card",
+        "FullyQualifiedName": "Bank Charges & Fees",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "BankCharges",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "5",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Billable Expense Income",
+        "SubAccount": false,
+        "FullyQualifiedName": "Billable Expense Income",
+        "Active": true,
+        "Classification": "Revenue",
+        "AccountType": "Income",
+        "AccountSubType": "SalesOfProductIncome",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "46",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T14:33:29-07:00",
+          "LastUpdatedTime": "2019-07-16T14:33:29-07:00"
+        }
+      },
+      {
+        "Name": "Car & Truck",
+        "SubAccount": false,
+        "Description": "Gas, repairs, insurance, and other costs for your business-only vehicle (not loan payments)",
+        "FullyQualifiedName": "Car & Truck",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "Auto",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "4",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Cash on Hand",
+        "SubAccount": false,
+        "FullyQualifiedName": "Cash on Hand",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Bank",
+        "AccountSubType": "CashOnHand",
+        "CurrentBalance": -1067581.92,
+        "CurrentBalanceWithSubAccounts": -1067581.92,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "48",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T19:23:46-07:00",
+          "LastUpdatedTime": "2026-03-05T10:35:48-08:00"
+        }
+      },
+      {
+        "Name": "Catering",
+        "SubAccount": false,
+        "FullyQualifiedName": "Catering",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "AdvertisingPromotional",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "98",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-10-07T12:08:14-07:00",
+          "LastUpdatedTime": "2019-10-07T12:08:14-07:00"
+        }
+      },
+      {
+        "Name": "Catering Sales",
+        "SubAccount": false,
+        "FullyQualifiedName": "Catering Sales",
+        "Active": true,
+        "Classification": "Revenue",
+        "AccountType": "Income",
+        "AccountSubType": "OtherPrimaryIncome",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "1150040002",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2025-04-16T11:02:31-07:00",
+          "LastUpdatedTime": "2025-04-16T11:02:31-07:00"
+        }
+      },
+      {
+        "Name": "Chargeback",
+        "SubAccount": false,
+        "FullyQualifiedName": "Chargeback",
+        "Active": true,
+        "Classification": "Revenue",
+        "AccountType": "Income",
+        "AccountSubType": "DiscountsRefundsGiven",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "1150040006",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2026-03-05T14:57:24-08:00",
+          "LastUpdatedTime": "2026-03-05T14:57:24-08:00"
+        }
+      },
+      {
+        "Name": "Chase",
+        "SubAccount": false,
+        "FullyQualifiedName": "Chase",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Credit Card",
+        "AccountSubType": "CreditCard",
+        "CurrentBalance": -25181.76,
+        "CurrentBalanceWithSubAccounts": -16253.65,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "31",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:32:39-07:00",
+          "LastUpdatedTime": "2026-03-09T14:53:40-07:00"
+        }
+      },
+      {
+        "Name": "Chase_Hooi",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "31"
+        },
+        "FullyQualifiedName": "Chase:Chase_Hooi",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Credit Card",
+        "AccountSubType": "CreditCard",
+        "CurrentBalance": -132970.29,
+        "CurrentBalanceWithSubAccounts": -132970.29,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "32",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:32:54-07:00",
+          "LastUpdatedTime": "2025-08-07T14:24:41-07:00"
+        }
+      },
+      {
+        "Name": "Chase_Howie",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "31"
+        },
+        "FullyQualifiedName": "Chase:Chase_Howie",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Credit Card",
+        "AccountSubType": "CreditCard",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "34",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:33:38-07:00",
+          "LastUpdatedTime": "2023-02-09T18:03:48-08:00"
+        }
+      },
+      {
+        "Name": "Chase_Sarn",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "31"
+        },
+        "FullyQualifiedName": "Chase:Chase_Sarn",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Credit Card",
+        "AccountSubType": "CreditCard",
+        "CurrentBalance": -117755.05,
+        "CurrentBalanceWithSubAccounts": -117755.05,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "35",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:33:50-07:00",
+          "LastUpdatedTime": "2023-02-01T09:06:07-08:00"
+        }
+      },
+      {
+        "Name": "Chase_Yixin",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "31"
+        },
+        "FullyQualifiedName": "Chase:Chase_Yixin",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Credit Card",
+        "AccountSubType": "CreditCard",
+        "CurrentBalance": -304158.94,
+        "CurrentBalanceWithSubAccounts": -304158.94,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "36",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:34:02-07:00",
+          "LastUpdatedTime": "2026-03-03T10:17:49-08:00"
+        }
+      },
+      {
+        "Name": "Chase_Zhiwei",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "31"
+        },
+        "FullyQualifiedName": "Chase:Chase_Zhiwei",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Credit Card",
+        "AccountSubType": "CreditCard",
+        "CurrentBalance": 647928.71,
+        "CurrentBalanceWithSubAccounts": 647928.71,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "33",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:33:16-07:00",
+          "LastUpdatedTime": "2026-03-09T14:53:40-07:00"
+        }
+      },
+      {
+        "Name": "E. SARN (8684) - 3",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "31"
+        },
+        "FullyQualifiedName": "Chase:E. SARN (8684) - 3",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Credit Card",
+        "AccountSubType": "CreditCard",
+        "CurrentBalance": -1778.27,
+        "CurrentBalanceWithSubAccounts": -1778.27,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "154",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2023-02-08T09:11:20-08:00",
+          "LastUpdatedTime": "2023-12-04T08:49:58-08:00"
+        }
+      },
+      {
+        "Name": "H. AU (9221)",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "31"
+        },
+        "FullyQualifiedName": "Chase:H. AU (9221)",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Credit Card",
+        "AccountSubType": "CreditCard",
+        "CurrentBalance": -381.42,
+        "CurrentBalanceWithSubAccounts": -381.42,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "150",
+        "SyncToken": "2",
+        "MetaData": {
+          "CreateTime": "2023-02-08T08:47:11-08:00",
+          "LastUpdatedTime": "2025-11-04T12:32:41-08:00"
+        }
+      },
+      {
+        "Name": "X. YANG (8240)",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "31"
+        },
+        "FullyQualifiedName": "Chase:X. YANG (8240)",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Credit Card",
+        "AccountSubType": "CreditCard",
+        "CurrentBalance": -81956.63,
+        "CurrentBalanceWithSubAccounts": -81956.63,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "152",
+        "SyncToken": "2",
+        "MetaData": {
+          "CreateTime": "2023-02-08T08:47:12-08:00",
+          "LastUpdatedTime": "2026-03-03T10:47:33-08:00"
+        }
+      },
+      {
+        "Name": "Checking",
+        "SubAccount": false,
+        "FullyQualifiedName": "Checking",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Bank",
+        "AccountSubType": "Checking",
+        "CurrentBalance": 111817.52,
+        "CurrentBalanceWithSubAccounts": 111817.52,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "26",
+        "SyncToken": "3",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:19:21-07:00",
+          "LastUpdatedTime": "2024-08-27T08:53:56-07:00"
+        }
+      },
+      {
+        "Name": "Chowbus",
+        "SubAccount": false,
+        "FullyQualifiedName": "Chowbus",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "42",
+        "SyncToken": "3",
+        "MetaData": {
+          "CreateTime": "2019-07-16T12:14:15-07:00",
+          "LastUpdatedTime": "2025-04-16T10:56:08-07:00"
+        }
+      },
+      {
+        "Name": "Chownow",
+        "SubAccount": false,
+        "FullyQualifiedName": "Chownow",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": 26567.35,
+        "CurrentBalanceWithSubAccounts": 26567.35,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "41",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T12:12:49-07:00",
+          "LastUpdatedTime": "2026-03-07T18:37:04-08:00"
+        }
+      },
+      {
+        "Name": "Cost of Goods Sold",
+        "SubAccount": false,
+        "FullyQualifiedName": "Cost of Goods Sold",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Cost of Goods Sold",
+        "AccountSubType": "SuppliesMaterialsCogs",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "39",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T12:10:38-07:00",
+          "LastUpdatedTime": "2019-07-16T12:10:38-07:00"
+        }
+      },
+      {
+        "Name": "Covid Care",
+        "SubAccount": false,
+        "FullyQualifiedName": "Covid Care",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "127",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-10-06T08:56:16-07:00",
+          "LastUpdatedTime": "2020-10-06T08:56:16-07:00"
+        }
+      },
+      {
+        "Name": "Credit Card AMEX Platinum",
+        "SubAccount": false,
+        "FullyQualifiedName": "Credit Card AMEX Platinum",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Credit Card",
+        "AccountSubType": "CreditCard",
+        "CurrentBalance": -1520.64,
+        "CurrentBalanceWithSubAccounts": -1520.64,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "156",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2025-03-04T11:57:11-08:00",
+          "LastUpdatedTime": "2026-03-03T10:17:54-08:00"
+        }
+      },
+      {
+        "Name": "Delivery Fee",
+        "SubAccount": false,
+        "FullyQualifiedName": "Delivery Fee",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "PayrollExpenses",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "89",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-09-02T12:13:39-07:00",
+          "LastUpdatedTime": "2026-03-05T15:21:31-08:00"
+        }
+      },
+      {
+        "Name": "Deposit",
+        "SubAccount": false,
+        "FullyQualifiedName": "Deposit",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": -22709.41,
+        "CurrentBalanceWithSubAccounts": -22709.41,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "44",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T12:15:47-07:00",
+          "LastUpdatedTime": "2026-03-04T09:50:16-08:00"
+        }
+      },
+      {
+        "Name": "Discount",
+        "SubAccount": false,
+        "FullyQualifiedName": "Discount",
+        "Active": true,
+        "Classification": "Revenue",
+        "AccountType": "Income",
+        "AccountSubType": "DiscountsRefundsGiven",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "43",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T12:15:09-07:00",
+          "LastUpdatedTime": "2019-07-16T12:15:09-07:00"
+        }
+      },
+      {
+        "Name": "Donation",
+        "SubAccount": false,
+        "FullyQualifiedName": "Donation",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "AdvertisingPromotional",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "96",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-10-03T11:48:16-07:00",
+          "LastUpdatedTime": "2019-10-03T11:48:16-07:00"
+        }
+      },
+      {
+        "Name": "Doordash",
+        "SubAccount": false,
+        "FullyQualifiedName": "Doordash",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "AllowanceForBadDebts",
+        "CurrentBalance": 9377.83,
+        "CurrentBalanceWithSubAccounts": 9377.83,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "45",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-07-16T12:16:54-07:00",
+          "LastUpdatedTime": "2026-03-07T18:37:06-08:00"
+        }
+      },
+      {
+        "Name": "E. SARN (8684) - 2",
+        "SubAccount": false,
+        "FullyQualifiedName": "E. SARN (8684) - 2",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Credit Card",
+        "AccountSubType": "CreditCard",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "151",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2023-02-08T08:47:12-08:00",
+          "LastUpdatedTime": "2023-02-08T09:35:28-08:00"
+        }
+      },
+      {
+        "Name": "Ezcater",
+        "SubAccount": false,
+        "FullyQualifiedName": "Ezcater",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": -14244.61,
+        "CurrentBalanceWithSubAccounts": -14244.61,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "49",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T19:26:44-07:00",
+          "LastUpdatedTime": "2026-02-11T09:49:24-08:00"
+        }
+      },
+      {
+        "Name": "Fantuan",
+        "SubAccount": false,
+        "FullyQualifiedName": "Fantuan",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": 11718.05,
+        "CurrentBalanceWithSubAccounts": 11718.05,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "132",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2021-03-05T11:13:03-08:00",
+          "LastUpdatedTime": "2026-03-04T09:50:29-08:00"
+        }
+      },
+      {
+        "Name": "Georgia Department of Revenue Payable",
+        "SubAccount": false,
+        "FullyQualifiedName": "Georgia Department of Revenue Payable",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "GlobalTaxPayable",
+        "CurrentBalance": -11057.43,
+        "CurrentBalanceWithSubAccounts": -11057.43,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "57",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-27T13:07:12-07:00",
+          "LastUpdatedTime": "2026-03-04T09:50:29-08:00"
+        }
+      },
+      {
+        "Name": "google",
+        "SubAccount": false,
+        "FullyQualifiedName": "google",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "AllowanceForBadDebts",
+        "CurrentBalance": -26390.53,
+        "CurrentBalanceWithSubAccounts": -26390.53,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "140",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2022-03-31T05:23:28-07:00",
+          "LastUpdatedTime": "2025-03-04T13:16:31-08:00"
+        }
+      },
+      {
+        "Name": "Grubhub",
+        "SubAccount": false,
+        "FullyQualifiedName": "Grubhub",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": -10276.68,
+        "CurrentBalanceWithSubAccounts": -10276.68,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "1150040000",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2024-12-06T13:04:53-08:00",
+          "LastUpdatedTime": "2026-03-03T10:28:13-08:00"
+        }
+      },
+      {
+        "Name": "Ignite Payment",
+        "SubAccount": false,
+        "FullyQualifiedName": "Ignite Payment",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": -99241.54,
+        "CurrentBalanceWithSubAccounts": 90354.72,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "28",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:20:50-07:00",
+          "LastUpdatedTime": "2026-03-07T18:37:07-08:00"
+        }
+      },
+      {
+        "Name": "Online Payment",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "28"
+        },
+        "Description": "Authorize.net website",
+        "FullyQualifiedName": "Ignite Payment:Online Payment",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": 189596.26,
+        "CurrentBalanceWithSubAccounts": 189596.26,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "118",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-05-04T08:46:25-07:00",
+          "LastUpdatedTime": "2026-03-04T09:50:29-08:00"
+        }
+      },
+      {
+        "Name": "Income Tax",
+        "SubAccount": false,
+        "FullyQualifiedName": "Income Tax",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Other Expense",
+        "AccountSubType": "OtherMiscellaneousExpense",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "88",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-08-30T09:11:15-07:00",
+          "LastUpdatedTime": "2019-08-30T09:11:15-07:00"
+        }
+      },
+      {
+        "Name": "Insurance",
+        "SubAccount": false,
+        "Description": "Liability, fire, theft, and other insurance for your business (not health)",
+        "FullyQualifiedName": "Insurance",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "Insurance",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "7",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Interest Paid",
+        "SubAccount": false,
+        "Description": "Interest paid on loans, credit cards, and business vehicles",
+        "FullyQualifiedName": "Interest Paid",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Other Expense",
+        "AccountSubType": "ExchangeGainOrLoss",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "8",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2020-03-22T14:23:33-07:00"
+        }
+      },
+      {
+        "Name": "Inventory Asset",
+        "SubAccount": false,
+        "FullyQualifiedName": "Inventory Asset",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "Inventory",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "40",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T12:10:38-07:00",
+          "LastUpdatedTime": "2019-07-16T12:10:38-07:00"
+        }
+      },
+      {
+        "Name": "Legal & Professional Services",
+        "SubAccount": false,
+        "Description": "Professional services including legal, financial, accounting, and payroll",
+        "FullyQualifiedName": "Legal & Professional Services",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "LegalProfessionalFees",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "9",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Licensing Fee",
+        "SubAccount": false,
+        "FullyQualifiedName": "Licensing Fee",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Other Expense",
+        "AccountSubType": "OtherMiscellaneousExpense",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "80",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-08-02T13:46:08-07:00",
+          "LastUpdatedTime": "2019-08-02T20:14:48-07:00"
+        }
+      },
+      {
+        "Name": "Liquor Tax",
+        "SubAccount": false,
+        "FullyQualifiedName": "Liquor Tax",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "FederalIncomeTaxPayable",
+        "CurrentBalance": -1775.21,
+        "CurrentBalanceWithSubAccounts": -1775.21,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "95",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-10-01T07:55:10-07:00",
+          "LastUpdatedTime": "2026-03-04T09:50:29-08:00"
+        }
+      },
+      {
+        "Name": "Loan - Xiao Ying He",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan - Xiao Ying He",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Long Term Liability",
+        "AccountSubType": "NotesPayable",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "108",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-03-03T08:22:37-08:00",
+          "LastUpdatedTime": "2023-09-04T12:44:19-07:00"
+        }
+      },
+      {
+        "Name": "Loan from YXKC RT",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan from YXKC RT",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "LoanPayable",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "149",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2022-11-07T12:41:54-08:00",
+          "LastUpdatedTime": "2023-11-02T09:05:26-07:00"
+        }
+      },
+      {
+        "Name": "Loan to Doraville",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to Doraville",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": 26625.23,
+        "CurrentBalanceWithSubAccounts": 26625.23,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "136",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2021-12-30T13:12:36-08:00",
+          "LastUpdatedTime": "2023-01-14T12:15:38-08:00"
+        }
+      },
+      {
+        "Name": "Loan to Duluth",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to Duluth",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "LoansToOthers",
+        "CurrentBalance": -6236.31,
+        "CurrentBalanceWithSubAccounts": -6236.31,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "107",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-02-27T09:32:06-08:00",
+          "LastUpdatedTime": "2021-12-30T13:13:00-08:00"
+        }
+      },
+      {
+        "Name": "Loan to FT Barrett",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to FT Barrett",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "LoansToOthers",
+        "CurrentBalance": 120000,
+        "CurrentBalanceWithSubAccounts": 120000,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "134",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2021-08-03T12:07:33-07:00",
+          "LastUpdatedTime": "2026-01-05T12:25:22-08:00"
+        }
+      },
+      {
+        "Name": "Loan to FT2",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to FT2",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "LoansToOthers",
+        "CurrentBalance": -183416.31,
+        "CurrentBalanceWithSubAccounts": -183416.31,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "68",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-08-01T12:20:06-07:00",
+          "LastUpdatedTime": "2026-03-04T09:50:02-08:00"
+        }
+      },
+      {
+        "Name": "Loan to FT3",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to FT3",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "LoanPayable",
+        "CurrentBalance": 17214.86,
+        "CurrentBalanceWithSubAccounts": 17214.86,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "141",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2022-03-31T14:55:52-07:00",
+          "LastUpdatedTime": "2026-03-04T09:50:02-08:00"
+        }
+      },
+      {
+        "Name": "Loan to FT4",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to FT4",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "LoanPayable",
+        "CurrentBalance": 5639.82,
+        "CurrentBalanceWithSubAccounts": 5639.82,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "142",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2022-03-31T14:56:22-07:00",
+          "LastUpdatedTime": "2026-03-04T09:50:02-08:00"
+        }
+      },
+      {
+        "Name": "Loan to Jessi",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to Jessi",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Long Term Liability",
+        "AccountSubType": "NotesPayable",
+        "CurrentBalance": 2500,
+        "CurrentBalanceWithSubAccounts": 2500,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "137",
+        "SyncToken": "2",
+        "MetaData": {
+          "CreateTime": "2022-02-08T11:49:39-08:00",
+          "LastUpdatedTime": "2022-02-08T11:53:25-08:00"
+        }
+      },
+      {
+        "Name": "Loan to Kitchen",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to Kitchen",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Bank",
+        "AccountSubType": "CashOnHand",
+        "CurrentBalance": 633953.8,
+        "CurrentBalanceWithSubAccounts": 633953.8,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "29",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:29:00-07:00",
+          "LastUpdatedTime": "2026-02-11T10:59:39-08:00"
+        }
+      },
+      {
+        "Name": "Loan to Lenox",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to Lenox",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Bank",
+        "AccountSubType": "CashOnHand",
+        "CurrentBalance": -70000,
+        "CurrentBalanceWithSubAccounts": -70000,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "146",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2022-09-09T12:21:09-07:00",
+          "LastUpdatedTime": "2022-09-09T12:21:15-07:00"
+        }
+      },
+      {
+        "Name": "Loan to Patrick",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to Patrick",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "LoansToStockholders",
+        "CurrentBalance": -22879.38,
+        "CurrentBalanceWithSubAccounts": -22879.38,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "67",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-08-01T12:18:28-07:00",
+          "LastUpdatedTime": "2025-10-01T04:23:00-07:00"
+        }
+      },
+      {
+        "Name": "Loan to Sweet Hut Group",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to Sweet Hut Group",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Bank",
+        "AccountSubType": "CashOnHand",
+        "CurrentBalance": 939521.48,
+        "CurrentBalanceWithSubAccounts": 939521.48,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "30",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:30:30-07:00",
+          "LastUpdatedTime": "2026-02-11T11:00:04-08:00"
+        }
+      },
+      {
+        "Name": "Loan to Sweet Hut Kennesaw",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to Sweet Hut Kennesaw",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Bank",
+        "AccountSubType": "CashOnHand",
+        "CurrentBalance": 271000,
+        "CurrentBalanceWithSubAccounts": 271000,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "148",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2022-09-09T12:22:12-07:00",
+          "LastUpdatedTime": "2022-09-09T12:22:14-07:00"
+        }
+      },
+      {
+        "Name": "Loan to Sweet Hut Midtown",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to Sweet Hut Midtown",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Bank",
+        "AccountSubType": "CashOnHand",
+        "CurrentBalance": 120800,
+        "CurrentBalanceWithSubAccounts": 120800,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "147",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2022-09-09T12:21:50-07:00",
+          "LastUpdatedTime": "2022-09-09T12:21:52-07:00"
+        }
+      },
+      {
+        "Name": "Loan to Sweet Keys",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to Sweet Keys",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 30000,
+        "CurrentBalanceWithSubAccounts": 30000,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "144",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2022-05-06T10:03:35-07:00",
+          "LastUpdatedTime": "2023-11-02T09:06:19-07:00"
+        }
+      },
+      {
+        "Name": "Loan to Texas",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to Texas",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "LoansToOthers",
+        "CurrentBalance": -30000,
+        "CurrentBalanceWithSubAccounts": -30000,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "69",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-08-02T09:21:31-07:00",
+          "LastUpdatedTime": "2019-08-02T09:21:33-07:00"
+        }
+      },
+      {
+        "Name": "Loan to Yao Wang",
+        "SubAccount": false,
+        "FullyQualifiedName": "Loan to Yao Wang",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": 3875,
+        "CurrentBalanceWithSubAccounts": 3875,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "131",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2021-02-22T13:03:55-08:00",
+          "LastUpdatedTime": "2021-02-22T13:04:18-08:00"
+        }
+      },
+      {
+        "Name": "Management Bonus",
+        "SubAccount": false,
+        "FullyQualifiedName": "Management Bonus",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Other Expense",
+        "AccountSubType": "OtherMiscellaneousExpense",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "126",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-09-23T13:24:30-07:00",
+          "LastUpdatedTime": "2020-09-23T13:24:30-07:00"
+        }
+      },
+      {
+        "Name": "Meals & Entertainment",
+        "SubAccount": false,
+        "Description": "Client meals and entertainment and travel meals (business-related only)",
+        "FullyQualifiedName": "Meals & Entertainment",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "EntertainmentMeals",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "10",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Merchant Processing Fee",
+        "SubAccount": false,
+        "FullyQualifiedName": "Merchant Processing Fee",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "BankCharges",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "97",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-10-03T12:12:37-07:00",
+          "LastUpdatedTime": "2020-08-12T10:02:12-07:00"
+        }
+      },
+      {
+        "Name": "Metro City Bank",
+        "SubAccount": false,
+        "FullyQualifiedName": "Metro City Bank",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Bank",
+        "AccountSubType": "Checking",
+        "CurrentBalance": 318060.22,
+        "CurrentBalanceWithSubAccounts": 318060.22,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "139",
+        "SyncToken": "2",
+        "MetaData": {
+          "CreateTime": "2022-03-17T10:10:47-07:00",
+          "LastUpdatedTime": "2026-03-07T18:37:07-08:00"
+        }
+      },
+      {
+        "Name": "Miscellaneous Expense",
+        "SubAccount": false,
+        "FullyQualifiedName": "Miscellaneous Expense",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Other Expense",
+        "AccountSubType": "OtherMiscellaneousExpense",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "155",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2024-01-18T11:24:17-08:00",
+          "LastUpdatedTime": "2024-01-18T11:24:17-08:00"
+        }
+      },
+      {
+        "Name": "Office Supplies & Software",
+        "SubAccount": false,
+        "Description": "Office, kitchen, and bathroom supplies, including software under $2,500",
+        "FullyQualifiedName": "Office Supplies & Software",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "OfficeGeneralAdministrativeExpenses",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "12",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Officer Wages",
+        "SubAccount": false,
+        "FullyQualifiedName": "Officer Wages",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Other Expense",
+        "AccountSubType": "OtherMiscellaneousExpense",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "61",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-07-31T08:18:00-07:00",
+          "LastUpdatedTime": "2022-05-12T18:08:24-07:00"
+        }
+      },
+      {
+        "Name": "Online Credit",
+        "SubAccount": false,
+        "FullyQualifiedName": "Online Credit",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": 26224.6,
+        "CurrentBalanceWithSubAccounts": 26224.6,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "47",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T19:19:48-07:00",
+          "LastUpdatedTime": "2026-03-04T09:49:13-08:00"
+        }
+      },
+      {
+        "Name": "Opening Balance Equity",
+        "SubAccount": false,
+        "FullyQualifiedName": "Opening Balance Equity",
+        "Active": true,
+        "Classification": "Equity",
+        "AccountType": "Equity",
+        "AccountSubType": "OpeningBalanceEquity",
+        "CurrentBalance": 249623.72,
+        "CurrentBalanceWithSubAccounts": 249623.72,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "27",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:19:29-07:00",
+          "LastUpdatedTime": "2025-04-16T11:13:34-07:00"
+        }
+      },
+      {
+        "Name": "Other Business Expenses",
+        "SubAccount": false,
+        "Description": "Other expenses for your business, including training and conferences",
+        "FullyQualifiedName": "Other Business Expenses",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "OfficeGeneralAdministrativeExpenses",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "11",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Other Current Assets",
+        "SubAccount": false,
+        "FullyQualifiedName": "Other Current Assets",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "110",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-03-30T10:39:16-07:00",
+          "LastUpdatedTime": "2020-03-30T10:39:16-07:00"
+        }
+      },
+      {
+        "Name": "Other Current Liabilities",
+        "SubAccount": false,
+        "FullyQualifiedName": "Other Current Liabilities",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "116",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-05-04T08:20:31-07:00",
+          "LastUpdatedTime": "2020-05-04T08:20:31-07:00"
+        }
+      },
+      {
+        "Name": "Other Income",
+        "SubAccount": false,
+        "FullyQualifiedName": "Other Income",
+        "Active": true,
+        "Classification": "Revenue",
+        "AccountType": "Income",
+        "AccountSubType": "OtherPrimaryIncome",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "78",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-08-02T13:35:32-07:00",
+          "LastUpdatedTime": "2019-08-02T13:35:32-07:00"
+        }
+      },
+      {
+        "Name": "Out Of Scope Agency Payable",
+        "SubAccount": false,
+        "FullyQualifiedName": "Out Of Scope Agency Payable",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "GlobalTaxPayable",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "58",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-27T13:07:12-07:00",
+          "LastUpdatedTime": "2019-07-27T13:07:12-07:00"
+        }
+      },
+      {
+        "Name": "Owner's Investment",
+        "SubAccount": false,
+        "Description": "Money you invested in your business",
+        "FullyQualifiedName": "Owner's Investment",
+        "Active": true,
+        "Classification": "Equity",
+        "AccountType": "Equity",
+        "AccountSubType": "OwnersEquity",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "22",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Owner's Pay & Personal Expenses",
+        "SubAccount": false,
+        "Description": "Money you took out of your business to pay yourself (not payroll expenses)",
+        "FullyQualifiedName": "Owner's Pay & Personal Expenses",
+        "Active": true,
+        "Classification": "Equity",
+        "AccountType": "Equity",
+        "AccountSubType": "OwnersEquity",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "21",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Payroll Clearing",
+        "SubAccount": false,
+        "FullyQualifiedName": "Payroll Clearing",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "PayrollClearing",
+        "CurrentBalance": -1280.84,
+        "CurrentBalanceWithSubAccounts": -1280.84,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "66",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-31T10:32:41-07:00",
+          "LastUpdatedTime": "2023-09-12T09:43:22-07:00"
+        }
+      },
+      {
+        "Name": "Payroll Expenses",
+        "SubAccount": false,
+        "FullyQualifiedName": "Payroll Expenses",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "PayrollExpenses",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "55",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-07-19T14:01:17-07:00",
+          "LastUpdatedTime": "2026-01-08T10:22:28-08:00"
+        }
+      },
+      {
+        "Name": "401k",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "55"
+        },
+        "Description": "401k",
+        "FullyQualifiedName": "Payroll Expenses:401k",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "PayrollExpenses",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "1150040001",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2025-02-03T11:46:17-08:00",
+          "LastUpdatedTime": "2026-01-08T10:22:28-08:00"
+        }
+      },
+      {
+        "Name": "Bonus",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "55"
+        },
+        "FullyQualifiedName": "Payroll Expenses:Bonus",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "PayrollExpenses",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "64",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-31T08:22:56-07:00",
+          "LastUpdatedTime": "2019-07-31T08:22:56-07:00"
+        }
+      },
+      {
+        "Name": "Contractors",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "55"
+        },
+        "Description": "Services provided by 1099 contractors, such as landscapers, electricians, and web designers",
+        "FullyQualifiedName": "Payroll Expenses:Contractors",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "PayrollExpenses",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "6",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-08-02T20:28:41-07:00"
+        }
+      },
+      {
+        "Name": "Management Fee",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "55"
+        },
+        "FullyQualifiedName": "Payroll Expenses:Management Fee",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "PayrollExpenses",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "83",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-08-02T20:22:25-07:00",
+          "LastUpdatedTime": "2019-08-02T20:22:25-07:00"
+        }
+      },
+      {
+        "Name": "Payroll Taxes",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "55"
+        },
+        "FullyQualifiedName": "Payroll Expenses:Payroll Taxes",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "PayrollExpenses",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "56",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-07-19T14:01:33-07:00",
+          "LastUpdatedTime": "2019-08-03T02:37:02-07:00"
+        }
+      },
+      {
+        "Name": "Vacation",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "55"
+        },
+        "FullyQualifiedName": "Payroll Expenses:Vacation",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "PayrollExpenses",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "62",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-31T08:18:42-07:00",
+          "LastUpdatedTime": "2019-07-31T08:18:42-07:00"
+        }
+      },
+      {
+        "Name": "Wages",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "55"
+        },
+        "FullyQualifiedName": "Payroll Expenses:Wages",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "PayrollExpenses",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "65",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-31T08:23:37-07:00",
+          "LastUpdatedTime": "2019-07-31T08:23:37-07:00"
+        }
+      },
+      {
+        "Name": "Payroll Liabilities",
+        "SubAccount": false,
+        "FullyQualifiedName": "Payroll Liabilities",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "PayrollTaxPayable",
+        "CurrentBalance": 0.03,
+        "CurrentBalanceWithSubAccounts": 0.03,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "63",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-31T08:20:20-07:00",
+          "LastUpdatedTime": "2019-08-05T13:52:03-07:00"
+        }
+      },
+      {
+        "Name": "PPP Loan",
+        "SubAccount": false,
+        "FullyQualifiedName": "PPP Loan",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "LoanPayable",
+        "CurrentBalance": -638080,
+        "CurrentBalanceWithSubAccounts": -638080,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "117",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2020-05-04T08:20:58-07:00",
+          "LastUpdatedTime": "2021-02-03T10:21:08-08:00"
+        }
+      },
+      {
+        "Name": "PPP Payroll",
+        "SubAccount": false,
+        "FullyQualifiedName": "PPP Payroll",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Other Expense",
+        "AccountSubType": "OtherMiscellaneousExpense",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "119",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-06-05T12:09:52-07:00",
+          "LastUpdatedTime": "2020-06-05T12:09:52-07:00"
+        }
+      },
+      {
+        "Name": "Printing",
+        "SubAccount": false,
+        "FullyQualifiedName": "Printing",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "AdvertisingPromotional",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "99",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-11-14T16:23:03-08:00",
+          "LastUpdatedTime": "2019-11-14T16:23:03-08:00"
+        }
+      },
+      {
+        "Name": "Purchase",
+        "SubAccount": false,
+        "FullyQualifiedName": "Purchase",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Cost of Goods Sold",
+        "AccountSubType": "SuppliesMaterialsCogs",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "37",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:36:21-07:00",
+          "LastUpdatedTime": "2023-02-08T08:49:53-08:00"
+        }
+      },
+      {
+        "Name": "Alcohol Purchase",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "37"
+        },
+        "FullyQualifiedName": "Purchase:Alcohol Purchase",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Cost of Goods Sold",
+        "AccountSubType": "SuppliesMaterialsCogs",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "54",
+        "SyncToken": "2",
+        "MetaData": {
+          "CreateTime": "2019-07-19T12:59:56-07:00",
+          "LastUpdatedTime": "2019-08-06T08:32:37-07:00"
+        }
+      },
+      {
+        "Name": "Cake",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "37"
+        },
+        "FullyQualifiedName": "Purchase:Cake",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Cost of Goods Sold",
+        "AccountSubType": "SuppliesMaterialsCogs",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "112",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-04-02T11:03:45-07:00",
+          "LastUpdatedTime": "2020-04-02T11:03:45-07:00"
+        }
+      },
+      {
+        "Name": "Cookie",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "37"
+        },
+        "FullyQualifiedName": "Purchase:Cookie",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Cost of Goods Sold",
+        "AccountSubType": "SuppliesMaterialsCogs",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "113",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-04-02T11:04:23-07:00",
+          "LastUpdatedTime": "2020-04-02T11:04:23-07:00"
+        }
+      },
+      {
+        "Name": "Dessert",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "37"
+        },
+        "FullyQualifiedName": "Purchase:Dessert",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Cost of Goods Sold",
+        "AccountSubType": "CostOfLaborCos",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "153",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2023-02-08T08:49:53-08:00",
+          "LastUpdatedTime": "2023-02-08T08:49:53-08:00"
+        }
+      },
+      {
+        "Name": "Drink",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "37"
+        },
+        "FullyQualifiedName": "Purchase:Drink",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Cost of Goods Sold",
+        "AccountSubType": "SuppliesMaterialsCogs",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "86",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-08-09T11:39:46-07:00",
+          "LastUpdatedTime": "2019-08-09T11:39:46-07:00"
+        }
+      },
+      {
+        "Name": "Food",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "37"
+        },
+        "FullyQualifiedName": "Purchase:Food",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Cost of Goods Sold",
+        "AccountSubType": "SuppliesMaterialsCogs",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "85",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-08-08T11:50:46-07:00",
+          "LastUpdatedTime": "2019-08-08T11:50:46-07:00"
+        }
+      },
+      {
+        "Name": "Packaging",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "37"
+        },
+        "FullyQualifiedName": "Purchase:Packaging",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Cost of Goods Sold",
+        "AccountSubType": "SuppliesMaterialsCogs",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "114",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-04-02T11:12:41-07:00",
+          "LastUpdatedTime": "2020-04-02T11:12:41-07:00"
+        }
+      },
+      {
+        "Name": "QuickBooks Payments Fees",
+        "SubAccount": false,
+        "FullyQualifiedName": "QuickBooks Payments Fees",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "OtherSellingExpenses",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "87",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-08-14T08:24:17-07:00",
+          "LastUpdatedTime": "2019-08-14T08:24:17-07:00"
+        }
+      },
+      {
+        "Name": "QuickBooks Payments Sales",
+        "SubAccount": false,
+        "FullyQualifiedName": "QuickBooks Payments Sales",
+        "Active": true,
+        "Classification": "Revenue",
+        "AccountType": "Income",
+        "AccountSubType": "SalesOfProductIncome",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "128",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-10-29T09:02:28-07:00",
+          "LastUpdatedTime": "2020-10-29T09:02:28-07:00"
+        }
+      },
+      {
+        "Name": "Reconciliation Discrepancies",
+        "SubAccount": false,
+        "FullyQualifiedName": "Reconciliation Discrepancies",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Other Expense",
+        "AccountSubType": "OtherMiscellaneousExpense",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "53",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-17T13:08:56-07:00",
+          "LastUpdatedTime": "2019-07-17T13:08:56-07:00"
+        }
+      },
+      {
+        "Name": "Reimbursable Expenses",
+        "SubAccount": false,
+        "Description": "Purchases you made for a customer that they will reimburse",
+        "FullyQualifiedName": "Reimbursable Expenses",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "SuppliesMaterials",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "13",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Rent & Lease",
+        "SubAccount": false,
+        "Description": "Office space, storage, vehicle, machinery, and equipment rentals and leases (short or long-term)",
+        "FullyQualifiedName": "Rent & Lease",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "RentOrLeaseOfBuildings",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "14",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Repairs & Maintenance",
+        "SubAccount": false,
+        "Description": "Repairs, maintenance, and cleaning for ofiice space and equipment",
+        "FullyQualifiedName": "Repairs & Maintenance",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "RepairMaintenance",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "15",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Retained Earnings",
+        "SubAccount": false,
+        "FullyQualifiedName": "Retained Earnings",
+        "Active": true,
+        "Classification": "Equity",
+        "AccountType": "Equity",
+        "AccountSubType": "RetainedEarnings",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "2",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Ricepo",
+        "SubAccount": false,
+        "FullyQualifiedName": "Ricepo",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": 200,
+        "CurrentBalanceWithSubAccounts": 200,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "130",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-12-09T13:53:03-08:00",
+          "LastUpdatedTime": "2025-08-05T07:57:48-07:00"
+        }
+      },
+      {
+        "Name": "RRF",
+        "SubAccount": false,
+        "FullyQualifiedName": "RRF",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Long Term Liability",
+        "AccountSubType": "NotesPayable",
+        "CurrentBalance": -931498,
+        "CurrentBalanceWithSubAccounts": -931498,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "133",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2021-06-01T09:14:32-07:00",
+          "LastUpdatedTime": "2021-06-01T09:14:35-07:00"
+        }
+      },
+      {
+        "Name": "Sales",
+        "SubAccount": false,
+        "FullyQualifiedName": "Sales",
+        "Active": true,
+        "Classification": "Revenue",
+        "AccountType": "Income",
+        "AccountSubType": "SalesOfProductIncome",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "1",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2020-04-06T11:54:40-07:00"
+        }
+      },
+      {
+        "Name": "Alcohol Sales",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "1"
+        },
+        "FullyQualifiedName": "Sales:Alcohol Sales",
+        "Active": true,
+        "Classification": "Revenue",
+        "AccountType": "Income",
+        "AccountSubType": "SalesOfProductIncome",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "109",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-03-09T13:01:01-07:00",
+          "LastUpdatedTime": "2020-03-09T13:01:01-07:00"
+        }
+      },
+      {
+        "Name": "Frozen",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "1"
+        },
+        "FullyQualifiedName": "Sales:Frozen",
+        "Active": true,
+        "Classification": "Revenue",
+        "AccountType": "Income",
+        "AccountSubType": "SalesOfProductIncome",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "115",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-04-06T11:54:40-07:00",
+          "LastUpdatedTime": "2020-04-06T11:54:40-07:00"
+        }
+      },
+      {
+        "Name": "Sales of Product Income",
+        "SubAccount": false,
+        "FullyQualifiedName": "Sales of Product Income",
+        "Active": true,
+        "Classification": "Revenue",
+        "AccountType": "Income",
+        "AccountSubType": "SalesOfProductIncome",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "38",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T12:10:38-07:00",
+          "LastUpdatedTime": "2019-07-16T12:10:38-07:00"
+        }
+      },
+      {
+        "Name": "Sales Tax",
+        "SubAccount": false,
+        "FullyQualifiedName": "Sales Tax",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "SalesTaxPayable",
+        "CurrentBalance": -40761.68,
+        "CurrentBalanceWithSubAccounts": -40761.68,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "50",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-07-16T19:34:28-07:00",
+          "LastUpdatedTime": "2026-03-04T09:50:29-08:00"
+        }
+      },
+      {
+        "Name": "Squarespace",
+        "SubAccount": false,
+        "FullyQualifiedName": "Squarespace",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": -193.9,
+        "CurrentBalanceWithSubAccounts": -193.9,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "129",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-11-04T09:05:46-08:00",
+          "LastUpdatedTime": "2021-04-02T09:20:23-07:00"
+        }
+      },
+      {
+        "Name": "Supplies",
+        "SubAccount": false,
+        "Description": "Supplies you bought to complete a job (not products you sell to customers)",
+        "FullyQualifiedName": "Supplies",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "SuppliesMaterials",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "16",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-12-04T08:24:53-08:00"
+        }
+      },
+      {
+        "Name": "Taxes & Licenses",
+        "SubAccount": false,
+        "Description": "Property and business taxes, licenses, memberships, and permits (not sales tax)",
+        "FullyQualifiedName": "Taxes & Licenses",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "TaxesPaid",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "17",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Travel",
+        "SubAccount": false,
+        "Description": "Business travel including transportation, hotels, and tips (not meals)",
+        "FullyQualifiedName": "Travel",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "Travel",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "18",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2019-07-16T09:43:46-07:00"
+        }
+      },
+      {
+        "Name": "Ubereats",
+        "SubAccount": false,
+        "FullyQualifiedName": "Ubereats",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "AllowanceForBadDebts",
+        "CurrentBalance": 15651.03,
+        "CurrentBalanceWithSubAccounts": 15651.03,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "111",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-03-30T10:40:38-07:00",
+          "LastUpdatedTime": "2026-03-05T15:39:59-08:00"
+        }
+      },
+      {
+        "Name": "Unapplied Cash Bill Payment Expense",
+        "SubAccount": false,
+        "FullyQualifiedName": "Unapplied Cash Bill Payment Expense",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "UnappliedCashBillPaymentExpense",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "92",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-09-03T10:45:22-07:00",
+          "LastUpdatedTime": "2019-09-03T10:45:22-07:00"
+        }
+      },
+      {
+        "Name": "Unapplied Cash Payment Income",
+        "SubAccount": false,
+        "FullyQualifiedName": "Unapplied Cash Payment Income",
+        "Active": true,
+        "Classification": "Revenue",
+        "AccountType": "Income",
+        "AccountSubType": "UnappliedCashPaymentIncome",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "79",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-08-02T13:38:15-07:00",
+          "LastUpdatedTime": "2019-08-02T13:38:15-07:00"
+        }
+      },
+      {
+        "Name": "Uncategorized Asset",
+        "SubAccount": false,
+        "FullyQualifiedName": "Uncategorized Asset",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "OtherCurrentAssets",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "23",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:17:51-07:00",
+          "LastUpdatedTime": "2019-07-16T10:17:51-07:00"
+        }
+      },
+      {
+        "Name": "Uncategorized Expense",
+        "SubAccount": false,
+        "FullyQualifiedName": "Uncategorized Expense",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "OtherMiscellaneousServiceCost",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "25",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:17:51-07:00",
+          "LastUpdatedTime": "2019-07-16T10:17:51-07:00"
+        }
+      },
+      {
+        "Name": "Uncategorized Income",
+        "SubAccount": false,
+        "FullyQualifiedName": "Uncategorized Income",
+        "Active": true,
+        "Classification": "Revenue",
+        "AccountType": "Income",
+        "AccountSubType": "SalesOfProductIncome",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "24",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T10:17:51-07:00",
+          "LastUpdatedTime": "2019-07-16T10:17:51-07:00"
+        }
+      },
+      {
+        "Name": "Undeposited Funds",
+        "SubAccount": false,
+        "FullyQualifiedName": "Undeposited Funds",
+        "Active": true,
+        "Classification": "Asset",
+        "AccountType": "Other Current Asset",
+        "AccountSubType": "UndepositedFunds",
+        "CurrentBalance": 41849.09,
+        "CurrentBalanceWithSubAccounts": 41849.09,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "52",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-17T10:15:26-07:00",
+          "LastUpdatedTime": "2026-03-04T09:50:29-08:00"
+        }
+      },
+      {
+        "Name": "Undistributed Tips",
+        "SubAccount": false,
+        "FullyQualifiedName": "Undistributed Tips",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "Gratuity",
+        "CurrentBalance": 2825.81,
+        "CurrentBalanceWithSubAccounts": 2825.81,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "51",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-17T09:33:54-07:00",
+          "LastUpdatedTime": "2026-03-04T09:50:29-08:00"
+        }
+      },
+      {
+        "Name": "Undistributed Tips 1",
+        "SubAccount": false,
+        "FullyQualifiedName": "Undistributed Tips 1",
+        "Active": true,
+        "Classification": "Liability",
+        "AccountType": "Other Current Liability",
+        "AccountSubType": "OtherCurrentLiabilities",
+        "CurrentBalance": -3915.39,
+        "CurrentBalanceWithSubAccounts": -3915.39,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "138",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2022-02-12T12:12:52-08:00",
+          "LastUpdatedTime": "2026-02-10T12:28:46-08:00"
+        }
+      },
+      {
+        "Name": "Utilities",
+        "SubAccount": false,
+        "Description": "Phone, gas, electric, water, internet, and other utilities for your business",
+        "FullyQualifiedName": "Utilities",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "Utilities",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "19",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2019-07-16T09:43:46-07:00",
+          "LastUpdatedTime": "2020-09-07T10:15:59-07:00"
+        }
+      },
+      {
+        "Name": "Utilities - Gas",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "19"
+        },
+        "FullyQualifiedName": "Utilities:Utilities - Gas",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "Utilities",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "121",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-09-07T10:12:09-07:00",
+          "LastUpdatedTime": "2020-09-07T10:12:09-07:00"
+        }
+      },
+      {
+        "Name": "Utilities - Internet",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "19"
+        },
+        "FullyQualifiedName": "Utilities:Utilities - Internet",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "Utilities",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "125",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-09-07T10:15:59-07:00",
+          "LastUpdatedTime": "2020-09-07T10:15:59-07:00"
+        }
+      },
+      {
+        "Name": "Utilities - Power",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "19"
+        },
+        "FullyQualifiedName": "Utilities:Utilities - Power",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "Utilities",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "124",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-09-07T10:15:33-07:00",
+          "LastUpdatedTime": "2020-09-07T10:15:33-07:00"
+        }
+      },
+      {
+        "Name": "Utilities - Trash",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "19"
+        },
+        "FullyQualifiedName": "Utilities:Utilities - Trash",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "Utilities",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "122",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-09-07T10:12:43-07:00",
+          "LastUpdatedTime": "2020-09-07T10:12:43-07:00"
+        }
+      },
+      {
+        "Name": "Utilities - Water",
+        "SubAccount": true,
+        "ParentRef": {
+          "value": "19"
+        },
+        "FullyQualifiedName": "Utilities:Utilities - Water",
+        "Active": true,
+        "Classification": "Expense",
+        "AccountType": "Expense",
+        "AccountSubType": "Utilities",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "123",
+        "SyncToken": "0",
+        "MetaData": {
+          "CreateTime": "2020-09-07T10:13:33-07:00",
+          "LastUpdatedTime": "2020-09-07T10:13:33-07:00"
+        }
+      },
+      {
+        "Name": "Wholesale",
+        "SubAccount": false,
+        "FullyQualifiedName": "Wholesale",
+        "Active": true,
+        "Classification": "Revenue",
+        "AccountType": "Income",
+        "AccountSubType": "SalesOfProductIncome",
+        "CurrentBalance": 0,
+        "CurrentBalanceWithSubAccounts": 0,
+        "CurrencyRef": {
+          "value": "USD",
+          "name": "United States Dollar"
+        },
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "103",
+        "SyncToken": "1",
+        "MetaData": {
+          "CreateTime": "2019-12-02T10:33:18-08:00",
+          "LastUpdatedTime": "2022-05-02T12:37:36-07:00"
+        }
+      }
+    ],
+    "startPosition": 1,
+    "maxResults": 152
+  },
+  "time": "2026-03-10T12:18:50.639-07:00"
+}

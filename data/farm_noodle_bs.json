@@ -1,0 +1,1362 @@
+{
+  "Header": {
+    "Time": "2026-03-10T12:18:44-07:00",
+    "ReportName": "BalanceSheet",
+    "DateMacro": "last month",
+    "ReportBasis": "Accrual",
+    "StartPeriod": "2026-02-01",
+    "EndPeriod": "2026-02-28",
+    "SummarizeColumnsBy": "Total",
+    "Currency": "USD",
+    "Option": [
+      {
+        "Name": "AccountingStandard",
+        "Value": "GAAP"
+      },
+      {
+        "Name": "NoReportData",
+        "Value": "false"
+      }
+    ]
+  },
+  "Columns": {
+    "Column": [
+      {
+        "ColTitle": "",
+        "ColType": "Account",
+        "MetaData": [
+          {
+            "Name": "ColKey",
+            "Value": "account"
+          }
+        ]
+      },
+      {
+        "ColTitle": "Total",
+        "ColType": "Money",
+        "MetaData": [
+          {
+            "Name": "ColKey",
+            "Value": "total"
+          }
+        ]
+      }
+    ]
+  },
+  "Rows": {
+    "Row": [
+      {
+        "Header": {
+          "ColData": [
+            {
+              "value": "ASSETS"
+            },
+            {
+              "value": ""
+            }
+          ]
+        },
+        "Rows": {
+          "Row": [
+            {
+              "Header": {
+                "ColData": [
+                  {
+                    "value": "Current Assets"
+                  },
+                  {
+                    "value": ""
+                  }
+                ]
+              },
+              "Rows": {
+                "Row": [
+                  {
+                    "Header": {
+                      "ColData": [
+                        {
+                          "value": "Bank Accounts"
+                        },
+                        {
+                          "value": ""
+                        }
+                      ]
+                    },
+                    "Rows": {
+                      "Row": [
+                        {
+                          "ColData": [
+                            {
+                              "value": "Cash on Hand",
+                              "id": "48"
+                            },
+                            {
+                              "value": "-1069226.94"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Checking",
+                              "id": "26"
+                            },
+                            {
+                              "value": "111817.52"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan to Kitchen",
+                              "id": "29"
+                            },
+                            {
+                              "value": "633953.80"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan to Lenox",
+                              "id": "146"
+                            },
+                            {
+                              "value": "-70000.00"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan to Sweet Hut Group",
+                              "id": "30"
+                            },
+                            {
+                              "value": "939521.48"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan to Sweet Hut Kennesaw",
+                              "id": "148"
+                            },
+                            {
+                              "value": "271000.00"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan to Sweet Hut Midtown",
+                              "id": "147"
+                            },
+                            {
+                              "value": "120800.00"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Metro City Bank",
+                              "id": "139"
+                            },
+                            {
+                              "value": "248253.75"
+                            }
+                          ],
+                          "type": "Data"
+                        }
+                      ]
+                    },
+                    "Summary": {
+                      "ColData": [
+                        {
+                          "value": "Total Bank Accounts"
+                        },
+                        {
+                          "value": "1186119.61"
+                        }
+                      ]
+                    },
+                    "type": "Section",
+                    "group": "BankAccounts"
+                  },
+                  {
+                    "Header": {
+                      "ColData": [
+                        {
+                          "value": "Accounts Receivable"
+                        },
+                        {
+                          "value": ""
+                        }
+                      ]
+                    },
+                    "Rows": {
+                      "Row": [
+                        {
+                          "ColData": [
+                            {
+                              "value": "Accounts Receivable (A/R)",
+                              "id": "59"
+                            },
+                            {
+                              "value": "5441.53"
+                            }
+                          ],
+                          "type": "Data"
+                        }
+                      ]
+                    },
+                    "Summary": {
+                      "ColData": [
+                        {
+                          "value": "Total Accounts Receivable"
+                        },
+                        {
+                          "value": "5441.53"
+                        }
+                      ]
+                    },
+                    "type": "Section",
+                    "group": "AR"
+                  },
+                  {
+                    "Header": {
+                      "ColData": [
+                        {
+                          "value": "Other Current Assets"
+                        },
+                        {
+                          "value": ""
+                        }
+                      ]
+                    },
+                    "Rows": {
+                      "Row": [
+                        {
+                          "ColData": [
+                            {
+                              "value": "Chowbus",
+                              "id": "42"
+                            },
+                            {
+                              "value": "0.00"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Chownow",
+                              "id": "41"
+                            },
+                            {
+                              "value": "26729.94"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Deposit",
+                              "id": "44"
+                            },
+                            {
+                              "value": "-22783.16"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Doordash",
+                              "id": "45"
+                            },
+                            {
+                              "value": "14180.38"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Ezcater",
+                              "id": "49"
+                            },
+                            {
+                              "value": "-14244.61"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Fantuan",
+                              "id": "132"
+                            },
+                            {
+                              "value": "11636.07"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "google",
+                              "id": "140"
+                            },
+                            {
+                              "value": "-26390.53"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Grubhub",
+                              "id": "1150040000"
+                            },
+                            {
+                              "value": "-10276.68"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "Header": {
+                            "ColData": [
+                              {
+                                "value": "Ignite Payment",
+                                "id": "28"
+                              },
+                              {
+                                "value": "-57508.95"
+                              }
+                            ]
+                          },
+                          "Rows": {
+                            "Row": [
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Online Payment",
+                                    "id": "118"
+                                  },
+                                  {
+                                    "value": "189492.57"
+                                  }
+                                ],
+                                "type": "Data"
+                              }
+                            ]
+                          },
+                          "Summary": {
+                            "ColData": [
+                              {
+                                "value": "Total Ignite Payment"
+                              },
+                              {
+                                "value": "131983.62"
+                              }
+                            ]
+                          },
+                          "type": "Section"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan to Doraville",
+                              "id": "136"
+                            },
+                            {
+                              "value": "26625.23"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan to Duluth",
+                              "id": "107"
+                            },
+                            {
+                              "value": "-6236.31"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan to FT Barrett",
+                              "id": "134"
+                            },
+                            {
+                              "value": "120000.00"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan to FT2",
+                              "id": "68"
+                            },
+                            {
+                              "value": "-184667.31"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan to Patrick",
+                              "id": "67"
+                            },
+                            {
+                              "value": "-22879.38"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan to Texas",
+                              "id": "69"
+                            },
+                            {
+                              "value": "-30000.00"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan to Yao Wang",
+                              "id": "131"
+                            },
+                            {
+                              "value": "3875.00"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Online Credit",
+                              "id": "47"
+                            },
+                            {
+                              "value": "26224.60"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Ricepo",
+                              "id": "130"
+                            },
+                            {
+                              "value": "200.00"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Squarespace",
+                              "id": "129"
+                            },
+                            {
+                              "value": "-193.90"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Ubereats",
+                              "id": "111"
+                            },
+                            {
+                              "value": "13050.08"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Undeposited Funds",
+                              "id": "52"
+                            },
+                            {
+                              "value": "41849.09"
+                            }
+                          ],
+                          "type": "Data"
+                        }
+                      ]
+                    },
+                    "Summary": {
+                      "ColData": [
+                        {
+                          "value": "Total Other Current Assets"
+                        },
+                        {
+                          "value": "98682.13"
+                        }
+                      ]
+                    },
+                    "type": "Section",
+                    "group": "OtherCurrentAssets"
+                  }
+                ]
+              },
+              "Summary": {
+                "ColData": [
+                  {
+                    "value": "Total Current Assets"
+                  },
+                  {
+                    "value": "1290243.27"
+                  }
+                ]
+              },
+              "type": "Section",
+              "group": "CurrentAssets"
+            }
+          ]
+        },
+        "Summary": {
+          "ColData": [
+            {
+              "value": "TOTAL ASSETS"
+            },
+            {
+              "value": "1290243.27"
+            }
+          ]
+        },
+        "type": "Section",
+        "group": "TotalAssets"
+      },
+      {
+        "Header": {
+          "ColData": [
+            {
+              "value": "LIABILITIES AND EQUITY"
+            },
+            {
+              "value": ""
+            }
+          ]
+        },
+        "Rows": {
+          "Row": [
+            {
+              "Header": {
+                "ColData": [
+                  {
+                    "value": "Liabilities"
+                  },
+                  {
+                    "value": ""
+                  }
+                ]
+              },
+              "Rows": {
+                "Row": [
+                  {
+                    "Header": {
+                      "ColData": [
+                        {
+                          "value": "Current Liabilities"
+                        },
+                        {
+                          "value": ""
+                        }
+                      ]
+                    },
+                    "Rows": {
+                      "Row": [
+                        {
+                          "Header": {
+                            "ColData": [
+                              {
+                                "value": "Accounts Payable"
+                              },
+                              {
+                                "value": ""
+                              }
+                            ]
+                          },
+                          "Rows": {
+                            "Row": [
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Accounts Payable (A/P)",
+                                    "id": "60"
+                                  },
+                                  {
+                                    "value": "183808.44"
+                                  }
+                                ],
+                                "type": "Data"
+                              }
+                            ]
+                          },
+                          "Summary": {
+                            "ColData": [
+                              {
+                                "value": "Total Accounts Payable"
+                              },
+                              {
+                                "value": "183808.44"
+                              }
+                            ]
+                          },
+                          "type": "Section",
+                          "group": "AP"
+                        },
+                        {
+                          "Header": {
+                            "ColData": [
+                              {
+                                "value": "Credit Cards"
+                              },
+                              {
+                                "value": ""
+                              }
+                            ]
+                          },
+                          "Rows": {
+                            "Row": [
+                              {
+                                "Header": {
+                                  "ColData": [
+                                    {
+                                      "value": "Chase",
+                                      "id": "31"
+                                    },
+                                    {
+                                      "value": "25181.76"
+                                    }
+                                  ]
+                                },
+                                "Rows": {
+                                  "Row": [
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "Chase_Hooi",
+                                          "id": "32"
+                                        },
+                                        {
+                                          "value": "132970.29"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "Chase_Sarn",
+                                          "id": "35"
+                                        },
+                                        {
+                                          "value": "117755.05"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "Chase_Yixin",
+                                          "id": "36"
+                                        },
+                                        {
+                                          "value": "304158.94"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "Chase_Zhiwei",
+                                          "id": "33"
+                                        },
+                                        {
+                                          "value": "-648378.59"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "E. SARN (8684) - 3",
+                                          "id": "154"
+                                        },
+                                        {
+                                          "value": "1778.27"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "H. AU (9221)",
+                                          "id": "150"
+                                        },
+                                        {
+                                          "value": "381.42"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "X. YANG (8240)",
+                                          "id": "152"
+                                        },
+                                        {
+                                          "value": "81956.63"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    }
+                                  ]
+                                },
+                                "Summary": {
+                                  "ColData": [
+                                    {
+                                      "value": "Total Chase"
+                                    },
+                                    {
+                                      "value": "15803.77"
+                                    }
+                                  ]
+                                },
+                                "type": "Section"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Credit Card AMEX Platinum",
+                                    "id": "156"
+                                  },
+                                  {
+                                    "value": "1520.64"
+                                  }
+                                ],
+                                "type": "Data"
+                              }
+                            ]
+                          },
+                          "Summary": {
+                            "ColData": [
+                              {
+                                "value": "Total Credit Cards"
+                              },
+                              {
+                                "value": "17324.41"
+                              }
+                            ]
+                          },
+                          "type": "Section",
+                          "group": "CreditCards"
+                        },
+                        {
+                          "Header": {
+                            "ColData": [
+                              {
+                                "value": "Other Current Liabilities"
+                              },
+                              {
+                                "value": ""
+                              }
+                            ]
+                          },
+                          "Rows": {
+                            "Row": [
+                              {
+                                "Header": {
+                                  "ColData": [
+                                    {
+                                      "value": "A/C",
+                                      "id": "70"
+                                    },
+                                    {
+                                      "value": ""
+                                    }
+                                  ]
+                                },
+                                "Rows": {
+                                  "Row": [
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing - Amy",
+                                          "id": "100"
+                                        },
+                                        {
+                                          "value": "-1302939.88"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing - Bree",
+                                          "id": "81"
+                                        },
+                                        {
+                                          "value": "-125572.00"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing - Gim Tan",
+                                          "id": "71"
+                                        },
+                                        {
+                                          "value": "-9000.00"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing - Helena",
+                                          "id": "72"
+                                        },
+                                        {
+                                          "value": "-12000.00"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing - Howie",
+                                          "id": "120"
+                                        },
+                                        {
+                                          "value": "-180343.50"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing - Jane",
+                                          "id": "94"
+                                        },
+                                        {
+                                          "value": "-259529.54"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing - Kuang",
+                                          "id": "76"
+                                        },
+                                        {
+                                          "value": "-24000.00"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing - Patrick",
+                                          "id": "74"
+                                        },
+                                        {
+                                          "value": "-636636.79"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing - Tong Song Leong",
+                                          "id": "102"
+                                        },
+                                        {
+                                          "value": "-1500.00"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing Anh Nguyen",
+                                          "id": "73"
+                                        },
+                                        {
+                                          "value": "-6000.00"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing Bruce Zhang",
+                                          "id": "106"
+                                        },
+                                        {
+                                          "value": "-2250.00"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing Xiang Cindy Chen",
+                                          "id": "75"
+                                        },
+                                        {
+                                          "value": "-4500.00"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing- Keong Tan",
+                                          "id": "77"
+                                        },
+                                        {
+                                          "value": "-1500.00"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    },
+                                    {
+                                      "ColData": [
+                                        {
+                                          "value": "A/C Drawing- Rachel and Tao",
+                                          "id": "93"
+                                        },
+                                        {
+                                          "value": "-918666.58"
+                                        }
+                                      ],
+                                      "type": "Data"
+                                    }
+                                  ]
+                                },
+                                "Summary": {
+                                  "ColData": [
+                                    {
+                                      "value": "Total A/C"
+                                    },
+                                    {
+                                      "value": "-3484438.29"
+                                    }
+                                  ]
+                                },
+                                "type": "Section"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "A/C Drawing - Cecilia",
+                                    "id": "143"
+                                  },
+                                  {
+                                    "value": "-6000.00"
+                                  }
+                                ],
+                                "type": "Data"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Georgia Department of Revenue Payable",
+                                    "id": "57"
+                                  },
+                                  {
+                                    "value": "11057.43"
+                                  }
+                                ],
+                                "type": "Data"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Liquor Tax",
+                                    "id": "95"
+                                  },
+                                  {
+                                    "value": "1757.95"
+                                  }
+                                ],
+                                "type": "Data"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Loan from YXKC RT",
+                                    "id": "149"
+                                  },
+                                  {
+                                    "value": "0.00"
+                                  }
+                                ],
+                                "type": "Data"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Loan to FT3",
+                                    "id": "141"
+                                  },
+                                  {
+                                    "value": "-16655.86"
+                                  }
+                                ],
+                                "type": "Data"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Loan to FT4",
+                                    "id": "142"
+                                  },
+                                  {
+                                    "value": "-5249.82"
+                                  }
+                                ],
+                                "type": "Data"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Loan to Sweet Keys",
+                                    "id": "144"
+                                  },
+                                  {
+                                    "value": "-30000.00"
+                                  }
+                                ],
+                                "type": "Data"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Payroll Clearing",
+                                    "id": "66"
+                                  },
+                                  {
+                                    "value": "1280.84"
+                                  }
+                                ],
+                                "type": "Data"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Payroll Liabilities",
+                                    "id": "63"
+                                  },
+                                  {
+                                    "value": "-0.03"
+                                  }
+                                ],
+                                "type": "Data"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "PPP Loan",
+                                    "id": "117"
+                                  },
+                                  {
+                                    "value": "638080.00"
+                                  }
+                                ],
+                                "type": "Data"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Sales Tax",
+                                    "id": "50"
+                                  },
+                                  {
+                                    "value": "39153.18"
+                                  }
+                                ],
+                                "type": "Data"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Undistributed Tips",
+                                    "id": "51"
+                                  },
+                                  {
+                                    "value": "-6166.24"
+                                  }
+                                ],
+                                "type": "Data"
+                              },
+                              {
+                                "ColData": [
+                                  {
+                                    "value": "Undistributed Tips 1",
+                                    "id": "138"
+                                  },
+                                  {
+                                    "value": "3915.39"
+                                  }
+                                ],
+                                "type": "Data"
+                              }
+                            ]
+                          },
+                          "Summary": {
+                            "ColData": [
+                              {
+                                "value": "Total Other Current Liabilities"
+                              },
+                              {
+                                "value": "-2853265.45"
+                              }
+                            ]
+                          },
+                          "type": "Section",
+                          "group": "OtherCurrentLiabilities"
+                        }
+                      ]
+                    },
+                    "Summary": {
+                      "ColData": [
+                        {
+                          "value": "Total Current Liabilities"
+                        },
+                        {
+                          "value": "-2652132.60"
+                        }
+                      ]
+                    },
+                    "type": "Section",
+                    "group": "CurrentLiabilities"
+                  },
+                  {
+                    "Header": {
+                      "ColData": [
+                        {
+                          "value": "Long-Term Liabilities"
+                        },
+                        {
+                          "value": ""
+                        }
+                      ]
+                    },
+                    "Rows": {
+                      "Row": [
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan - Xiao Ying He",
+                              "id": "108"
+                            },
+                            {
+                              "value": "0.00"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "Loan to Jessi",
+                              "id": "137"
+                            },
+                            {
+                              "value": "-2500.00"
+                            }
+                          ],
+                          "type": "Data"
+                        },
+                        {
+                          "ColData": [
+                            {
+                              "value": "RRF",
+                              "id": "133"
+                            },
+                            {
+                              "value": "931498.00"
+                            }
+                          ],
+                          "type": "Data"
+                        }
+                      ]
+                    },
+                    "Summary": {
+                      "ColData": [
+                        {
+                          "value": "Total Long-Term Liabilities"
+                        },
+                        {
+                          "value": "928998.00"
+                        }
+                      ]
+                    },
+                    "type": "Section",
+                    "group": "LongTermLiabilities"
+                  }
+                ]
+              },
+              "Summary": {
+                "ColData": [
+                  {
+                    "value": "Total Liabilities"
+                  },
+                  {
+                    "value": "-1723134.60"
+                  }
+                ]
+              },
+              "type": "Section",
+              "group": "Liabilities"
+            },
+            {
+              "Header": {
+                "ColData": [
+                  {
+                    "value": "Equity"
+                  },
+                  {
+                    "value": ""
+                  }
+                ]
+              },
+              "Rows": {
+                "Row": [
+                  {
+                    "ColData": [
+                      {
+                        "value": "Opening Balance Equity",
+                        "id": "27"
+                      },
+                      {
+                        "value": "-249623.72"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Retained Earnings",
+                        "id": "2"
+                      },
+                      {
+                        "value": "3171734.55"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Net Income"
+                      },
+                      {
+                        "value": "91267.04"
+                      }
+                    ],
+                    "type": "Data",
+                    "group": "NetIncome"
+                  }
+                ]
+              },
+              "Summary": {
+                "ColData": [
+                  {
+                    "value": "Total Equity"
+                  },
+                  {
+                    "value": "3013377.87"
+                  }
+                ]
+              },
+              "type": "Section",
+              "group": "Equity"
+            }
+          ]
+        },
+        "Summary": {
+          "ColData": [
+            {
+              "value": "TOTAL LIABILITIES AND EQUITY"
+            },
+            {
+              "value": "1290243.27"
+            }
+          ]
+        },
+        "type": "Section",
+        "group": "TotalLiabilitiesAndEquity"
+      }
+    ]
+  }
+}

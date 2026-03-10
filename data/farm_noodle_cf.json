@@ -1,0 +1,470 @@
+{
+  "Header": {
+    "Time": "2026-03-10T12:18:46-07:00",
+    "ReportName": "CashFlow",
+    "DateMacro": "this calendar year-to-date",
+    "StartPeriod": "2026-01-01",
+    "EndPeriod": "2026-03-10",
+    "SummarizeColumnsBy": "Total",
+    "Currency": "USD",
+    "Option": [
+      {
+        "Name": "NoReportData",
+        "Value": "false"
+      }
+    ]
+  },
+  "Columns": {
+    "Column": [
+      {
+        "ColTitle": "",
+        "ColType": "Account"
+      },
+      {
+        "ColTitle": "Total",
+        "ColType": "Money",
+        "MetaData": [
+          {
+            "Name": "ColKey",
+            "Value": "total"
+          }
+        ]
+      }
+    ]
+  },
+  "Rows": {
+    "Row": [
+      {
+        "Header": {
+          "ColData": [
+            {
+              "value": "OPERATING ACTIVITIES"
+            },
+            {
+              "value": ""
+            }
+          ]
+        },
+        "Rows": {
+          "Row": [
+            {
+              "ColData": [
+                {
+                  "value": "Net Income"
+                },
+                {
+                  "value": "115665.10"
+                }
+              ],
+              "type": "Data",
+              "group": "NetIncome"
+            },
+            {
+              "Header": {
+                "ColData": [
+                  {
+                    "value": "Adjustments to reconcile Net Income to Net Cash provided by operations:"
+                  },
+                  {
+                    "value": ""
+                  }
+                ]
+              },
+              "Rows": {
+                "Row": [
+                  {
+                    "ColData": [
+                      {
+                        "value": "Accounts Receivable (A/R)",
+                        "id": "59"
+                      },
+                      {
+                        "value": "0.00"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Chownow",
+                        "id": "41"
+                      },
+                      {
+                        "value": "-71.22"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Deposit",
+                        "id": "44"
+                      },
+                      {
+                        "value": "2269.96"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Doordash",
+                        "id": "45"
+                      },
+                      {
+                        "value": "11720.37"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Ezcater",
+                        "id": "49"
+                      },
+                      {
+                        "value": "927.80"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Fantuan",
+                        "id": "132"
+                      },
+                      {
+                        "value": "-407.79"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Grubhub",
+                        "id": "1150040000"
+                      },
+                      {
+                        "value": "1625.61"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Ignite Payment",
+                        "id": "28"
+                      },
+                      {
+                        "value": "27652.96"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Ignite Payment:Online Payment",
+                        "id": "118"
+                      },
+                      {
+                        "value": "-3647.83"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Loan to FT2",
+                        "id": "68"
+                      },
+                      {
+                        "value": "2600.72"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Online Credit",
+                        "id": "47"
+                      },
+                      {
+                        "value": "-2690.00"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Ubereats",
+                        "id": "111"
+                      },
+                      {
+                        "value": "-5858.62"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Accounts Payable (A/P)",
+                        "id": "60"
+                      },
+                      {
+                        "value": "139825.06"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Chase:Chase_Yixin",
+                        "id": "36"
+                      },
+                      {
+                        "value": "4704.43"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Chase:Chase_Zhiwei",
+                        "id": "33"
+                      },
+                      {
+                        "value": "-14950.41"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Chase:X. YANG (8240)",
+                        "id": "152"
+                      },
+                      {
+                        "value": "4346.48"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Credit Card AMEX Platinum",
+                        "id": "156"
+                      },
+                      {
+                        "value": "1495.23"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "A/C:A/C Drawing - Amy",
+                        "id": "100"
+                      },
+                      {
+                        "value": "-46000.00"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "A/C:A/C Drawing - Howie",
+                        "id": "120"
+                      },
+                      {
+                        "value": "-4000.00"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "A/C:A/C Drawing - Jane",
+                        "id": "94"
+                      },
+                      {
+                        "value": "-13384.60"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Georgia Department of Revenue Payable",
+                        "id": "57"
+                      },
+                      {
+                        "value": "683.08"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Liquor Tax",
+                        "id": "95"
+                      },
+                      {
+                        "value": "423.78"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Loan to FT3",
+                        "id": "141"
+                      },
+                      {
+                        "value": "-11533.00"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Loan to FT4",
+                        "id": "142"
+                      },
+                      {
+                        "value": "1865.00"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Sales Tax",
+                        "id": "50"
+                      },
+                      {
+                        "value": "-1925.48"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Undistributed Tips",
+                        "id": "51"
+                      },
+                      {
+                        "value": "-19636.07"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Undistributed Tips 1",
+                        "id": "138"
+                      },
+                      {
+                        "value": "746.81"
+                      }
+                    ],
+                    "type": "Data"
+                  }
+                ]
+              },
+              "Summary": {
+                "ColData": [
+                  {
+                    "value": "Total Adjustments to reconcile Net Income to Net Cash provided by operations:"
+                  },
+                  {
+                    "value": "76782.27"
+                  }
+                ]
+              },
+              "type": "Section",
+              "group": "OperatingAdjustments"
+            }
+          ]
+        },
+        "Summary": {
+          "ColData": [
+            {
+              "value": "Net cash provided by operating activities"
+            },
+            {
+              "value": "192447.37"
+            }
+          ]
+        },
+        "type": "Section",
+        "group": "OperatingActivities"
+      },
+      {
+        "Summary": {
+          "ColData": [
+            {
+              "value": "Net cash increase for period"
+            },
+            {
+              "value": "192447.37"
+            }
+          ]
+        },
+        "type": "Section",
+        "group": "CashIncrease"
+      },
+      {
+        "ColData": [
+          {
+            "value": "Cash at beginning of period"
+          },
+          {
+            "value": "1106972.82"
+          }
+        ],
+        "group": "BeginningCash"
+      },
+      {
+        "Summary": {
+          "ColData": [
+            {
+              "value": "Cash at end of period"
+            },
+            {
+              "value": "1299420.19"
+            }
+          ]
+        },
+        "type": "Section",
+        "group": "EndingCash"
+      }
+    ]
+  }
+}

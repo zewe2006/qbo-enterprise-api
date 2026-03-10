@@ -1,0 +1,778 @@
+{
+  "Header": {
+    "Time": "2026-03-10T12:18:40-07:00",
+    "ReportName": "ProfitAndLoss",
+    "DateMacro": "last month",
+    "ReportBasis": "Accrual",
+    "StartPeriod": "2026-02-01",
+    "EndPeriod": "2026-02-28",
+    "SummarizeColumnsBy": "Total",
+    "Currency": "USD",
+    "Option": [
+      {
+        "Name": "AccountingStandard",
+        "Value": "GAAP"
+      },
+      {
+        "Name": "NoReportData",
+        "Value": "false"
+      }
+    ]
+  },
+  "Columns": {
+    "Column": [
+      {
+        "ColTitle": "",
+        "ColType": "Account",
+        "MetaData": [
+          {
+            "Name": "ColKey",
+            "Value": "account"
+          }
+        ]
+      },
+      {
+        "ColTitle": "Total",
+        "ColType": "Money",
+        "MetaData": [
+          {
+            "Name": "ColKey",
+            "Value": "total"
+          }
+        ]
+      }
+    ]
+  },
+  "Rows": {
+    "Row": [
+      {
+        "Header": {
+          "ColData": [
+            {
+              "value": "Income"
+            },
+            {
+              "value": ""
+            }
+          ]
+        },
+        "Rows": {
+          "Row": [
+            {
+              "ColData": [
+                {
+                  "value": "Chargeback",
+                  "id": "1150040006"
+                },
+                {
+                  "value": "-80.55"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Discount",
+                  "id": "43"
+                },
+                {
+                  "value": "-1929.74"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "Header": {
+                "ColData": [
+                  {
+                    "value": "Sales",
+                    "id": "1"
+                  },
+                  {
+                    "value": "285585.67"
+                  }
+                ]
+              },
+              "Rows": {
+                "Row": [
+                  {
+                    "ColData": [
+                      {
+                        "value": "Alcohol Sales",
+                        "id": "109"
+                      },
+                      {
+                        "value": "12023.10"
+                      }
+                    ],
+                    "type": "Data"
+                  }
+                ]
+              },
+              "Summary": {
+                "ColData": [
+                  {
+                    "value": "Total Sales"
+                  },
+                  {
+                    "value": "297608.77"
+                  }
+                ]
+              },
+              "type": "Section"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Wholesale",
+                  "id": "103"
+                },
+                {
+                  "value": "21844.00"
+                }
+              ],
+              "type": "Data"
+            }
+          ]
+        },
+        "Summary": {
+          "ColData": [
+            {
+              "value": "Total Income"
+            },
+            {
+              "value": "317442.48"
+            }
+          ]
+        },
+        "type": "Section",
+        "group": "Income"
+      },
+      {
+        "Header": {
+          "ColData": [
+            {
+              "value": "Cost of Goods Sold"
+            },
+            {
+              "value": ""
+            }
+          ]
+        },
+        "Rows": {
+          "Row": [
+            {
+              "Header": {
+                "ColData": [
+                  {
+                    "value": "Purchase",
+                    "id": "37"
+                  },
+                  {
+                    "value": "807.88"
+                  }
+                ]
+              },
+              "Rows": {
+                "Row": [
+                  {
+                    "ColData": [
+                      {
+                        "value": "Alcohol Purchase",
+                        "id": "54"
+                      },
+                      {
+                        "value": "2567.79"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Cake",
+                        "id": "112"
+                      },
+                      {
+                        "value": "668.78"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Dessert",
+                        "id": "153"
+                      },
+                      {
+                        "value": "855.00"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Drink",
+                        "id": "86"
+                      },
+                      {
+                        "value": "1278.28"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Food",
+                        "id": "85"
+                      },
+                      {
+                        "value": "97672.68"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Packaging",
+                        "id": "114"
+                      },
+                      {
+                        "value": "4531.30"
+                      }
+                    ],
+                    "type": "Data"
+                  }
+                ]
+              },
+              "Summary": {
+                "ColData": [
+                  {
+                    "value": "Total Purchase"
+                  },
+                  {
+                    "value": "108381.71"
+                  }
+                ]
+              },
+              "type": "Section"
+            }
+          ]
+        },
+        "Summary": {
+          "ColData": [
+            {
+              "value": "Total Cost of Goods Sold"
+            },
+            {
+              "value": "108381.71"
+            }
+          ]
+        },
+        "type": "Section",
+        "group": "COGS"
+      },
+      {
+        "Summary": {
+          "ColData": [
+            {
+              "value": "Gross Profit"
+            },
+            {
+              "value": "209060.77"
+            }
+          ]
+        },
+        "type": "Section",
+        "group": "GrossProfit"
+      },
+      {
+        "Header": {
+          "ColData": [
+            {
+              "value": "Expenses"
+            },
+            {
+              "value": ""
+            }
+          ]
+        },
+        "Rows": {
+          "Row": [
+            {
+              "Header": {
+                "ColData": [
+                  {
+                    "value": "Advertising & Marketing",
+                    "id": "3"
+                  },
+                  {
+                    "value": "2976.09"
+                  }
+                ]
+              },
+              "Rows": {
+                "Row": [
+                  {
+                    "ColData": [
+                      {
+                        "value": "Online Order Marketing",
+                        "id": "1150040005"
+                      },
+                      {
+                        "value": "2313.87"
+                      }
+                    ],
+                    "type": "Data"
+                  }
+                ]
+              },
+              "Summary": {
+                "ColData": [
+                  {
+                    "value": "Total Advertising & Marketing"
+                  },
+                  {
+                    "value": "5289.96"
+                  }
+                ]
+              },
+              "type": "Section"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Bank Charges & Fees",
+                  "id": "5"
+                },
+                {
+                  "value": "5.10"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Car & Truck",
+                  "id": "4"
+                },
+                {
+                  "value": "316.27"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Delivery Fee",
+                  "id": "89"
+                },
+                {
+                  "value": "7318.10"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Insurance",
+                  "id": "7"
+                },
+                {
+                  "value": "1186.09"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Legal & Professional Services",
+                  "id": "9"
+                },
+                {
+                  "value": "375.00"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Merchant Processing Fee",
+                  "id": "97"
+                },
+                {
+                  "value": "6757.53"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Office Supplies & Software",
+                  "id": "12"
+                },
+                {
+                  "value": "2574.55"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "Header": {
+                "ColData": [
+                  {
+                    "value": "Payroll Expenses",
+                    "id": "55"
+                  },
+                  {
+                    "value": "-1451.79"
+                  }
+                ]
+              },
+              "Rows": {
+                "Row": [
+                  {
+                    "ColData": [
+                      {
+                        "value": "401k",
+                        "id": "1150040001"
+                      },
+                      {
+                        "value": "1451.79"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Bonus",
+                        "id": "64"
+                      },
+                      {
+                        "value": "1470.00"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Contractors",
+                        "id": "6"
+                      },
+                      {
+                        "value": "-4196.71"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Management Fee",
+                        "id": "83"
+                      },
+                      {
+                        "value": "5500.00"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Payroll Taxes",
+                        "id": "56"
+                      },
+                      {
+                        "value": "5444.90"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Wages",
+                        "id": "65"
+                      },
+                      {
+                        "value": "22197.69"
+                      }
+                    ],
+                    "type": "Data"
+                  }
+                ]
+              },
+              "Summary": {
+                "ColData": [
+                  {
+                    "value": "Total Payroll Expenses"
+                  },
+                  {
+                    "value": "30415.88"
+                  }
+                ]
+              },
+              "type": "Section"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "QuickBooks Payments Fees",
+                  "id": "87"
+                },
+                {
+                  "value": "298.05"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Reimbursable Expenses",
+                  "id": "13"
+                },
+                {
+                  "value": "425.00"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Rent & Lease",
+                  "id": "14"
+                },
+                {
+                  "value": "25393.00"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Repairs & Maintenance",
+                  "id": "15"
+                },
+                {
+                  "value": "2347.18"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Supplies",
+                  "id": "16"
+                },
+                {
+                  "value": "3266.08"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "Header": {
+                "ColData": [
+                  {
+                    "value": "Utilities",
+                    "id": "19"
+                  },
+                  {
+                    "value": "1951.07"
+                  }
+                ]
+              },
+              "Rows": {
+                "Row": [
+                  {
+                    "ColData": [
+                      {
+                        "value": "Utilities - Gas",
+                        "id": "121"
+                      },
+                      {
+                        "value": "2270.01"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Utilities - Internet",
+                        "id": "125"
+                      },
+                      {
+                        "value": "287.48"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Utilities - Power",
+                        "id": "124"
+                      },
+                      {
+                        "value": "3034.43"
+                      }
+                    ],
+                    "type": "Data"
+                  },
+                  {
+                    "ColData": [
+                      {
+                        "value": "Utilities - Water",
+                        "id": "123"
+                      },
+                      {
+                        "value": "3063.18"
+                      }
+                    ],
+                    "type": "Data"
+                  }
+                ]
+              },
+              "Summary": {
+                "ColData": [
+                  {
+                    "value": "Total Utilities"
+                  },
+                  {
+                    "value": "10606.17"
+                  }
+                ]
+              },
+              "type": "Section"
+            }
+          ]
+        },
+        "Summary": {
+          "ColData": [
+            {
+              "value": "Total Expenses"
+            },
+            {
+              "value": "96573.96"
+            }
+          ]
+        },
+        "type": "Section",
+        "group": "Expenses"
+      },
+      {
+        "Summary": {
+          "ColData": [
+            {
+              "value": "Net Operating Income"
+            },
+            {
+              "value": "112486.81"
+            }
+          ]
+        },
+        "type": "Section",
+        "group": "NetOperatingIncome"
+      },
+      {
+        "Header": {
+          "ColData": [
+            {
+              "value": "Other Expenses"
+            },
+            {
+              "value": ""
+            }
+          ]
+        },
+        "Rows": {
+          "Row": [
+            {
+              "ColData": [
+                {
+                  "value": "Licensing Fee",
+                  "id": "80"
+                },
+                {
+                  "value": "8928.26"
+                }
+              ],
+              "type": "Data"
+            },
+            {
+              "ColData": [
+                {
+                  "value": "Officer Wages",
+                  "id": "61"
+                },
+                {
+                  "value": "9230.76"
+                }
+              ],
+              "type": "Data"
+            }
+          ]
+        },
+        "Summary": {
+          "ColData": [
+            {
+              "value": "Total Other Expenses"
+            },
+            {
+              "value": "18159.02"
+            }
+          ]
+        },
+        "type": "Section",
+        "group": "OtherExpenses"
+      },
+      {
+        "Summary": {
+          "ColData": [
+            {
+              "value": "Net Other Income"
+            },
+            {
+              "value": "-18159.02"
+            }
+          ]
+        },
+        "type": "Section",
+        "group": "NetOtherIncome"
+      },
+      {
+        "Summary": {
+          "ColData": [
+            {
+              "value": "Net Income"
+            },
+            {
+              "value": "94327.79"
+            }
+          ]
+        },
+        "type": "Section",
+        "group": "NetIncome"
+      }
+    ]
+  }
+}
