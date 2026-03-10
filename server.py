@@ -59,7 +59,10 @@ QBO_SCOPES = "com.intuit.quickbooks.accounting"
 # Fixed OAuth redirect URI — must match exactly what is registered in Intuit Developer portal.
 # Set this env var on Railway to your Railway public URL + /api/qbo/callback
 # Example: https://your-app.up.railway.app/api/qbo/callback
-QBO_REDIRECT_URI = os.environ.get("QBO_REDIRECT_URI", "")
+QBO_REDIRECT_URI = os.environ.get(
+    "QBO_REDIRECT_URI",
+    "https://overflowing-ambition-production-4b7e.up.railway.app/api/qbo/callback"
+)
 
 # Frontend origin for CORS — set to your Netlify URL
 FRONTEND_ORIGIN = os.environ.get(
