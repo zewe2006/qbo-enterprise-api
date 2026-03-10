@@ -647,8 +647,8 @@ async def qbo_authorize(request: Request, body: AuthorizeRequest = None):
         "INSERT INTO oauth_states (state, redirect_uri) VALUES (?, ?)",
         (state, redirect_uri),
     )
-    # Clean up old states (older than 10 minutes)
-    db.execute("DELETE FROM oauth_states WHERE created_at < datetime('now', '-10 minutes')")
+    # Clean up old states (older than 1 hour)
+    db.execute("DELETE FROM oauth_states WHERE created_at < datetime('now', '-60 minutes')")
     db.commit()
     db.close()
 
