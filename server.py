@@ -929,6 +929,13 @@ async def qbo_callback(request: Request, code: str = None, state: str = None,
         "SELECT state, redirect_uri FROM oauth_states WHERE state = ?", (state,)
     ).fetchone()
     if not state_row:
+        # Log all existing states for debugging
+        all_states = db.execute("SELECT state, created_at FROM oauth_states").fetchall()
+        logger.error(
+            "OAuth callback INVALID STATE | received_state=%s | stored_states=%d | states=%s",
+            state, len(all_states),
+            [(s["state"][:20] + "...", s["created_at"]) for s in all_states],
+        )
         db.close()
         return HTMLResponse(content="""<html><body>
             <h2>Invalid State</h2><p>Security check failed. Please try again.</p>
