@@ -2126,11 +2126,13 @@ async def dashboard_summary(
     period: str = "last_month",
     start_date: str = None,
     end_date: str = None,
+    company_ids: str = None,
 ):
     """KPI data for home page. Pulls live data from connected companies.
     
     period: last_month (default), ytd_last_month, custom
     start_date/end_date: required when period=custom (YYYY-MM-DD)
+    company_ids: comma-separated company UUIDs to filter (omit for all)
     """
     db = get_db()
     company_count = db.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
@@ -2138,6 +2140,11 @@ async def dashboard_summary(
         "SELECT id, name FROM companies WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != ''"
     ).fetchall()
     db.close()
+
+    # Filter by selected companies
+    if company_ids:
+        selected = set(company_ids.split(","))
+        connected = [c for c in connected if c["id"] in selected]
 
     now = datetime.now()
     y, m = now.year, now.month
