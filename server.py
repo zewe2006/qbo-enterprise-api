@@ -1596,10 +1596,7 @@ def _parse_gl_transactions(report: dict, company_name: str, filter_account: str 
                         val = cd.get("value", "")
                         col_title = columns[i] if i < len(columns) else f"col_{i}"
                         txn[col_title] = val
-                    # Skip if it looks like a total/summary row (no date)
-                    date_val = txn.get("Date", "") or txn.get("date", "")
-                    if date_val:
-                        transactions.append(txn)
+                    transactions.append(txn)
                 # Also recurse if nested
                 if row.get("Rows"):
                     walk_rows(row["Rows"], in_matching_section=in_matching_section)
