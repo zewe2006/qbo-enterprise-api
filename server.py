@@ -17,6 +17,7 @@ Self-hosted setup:
   Server runs on http://localhost:8000
 """
 import base64
+import calendar
 import hashlib
 import json
 import os
@@ -1294,6 +1295,8 @@ async def _get_live_consolidated(params, qbo_report_name, report_type):
         return {"current": None, "consolidated": True, "companies": [], "message": "No connected companies. Connect and sync companies first."}
 
     reports = []
+    prior_year_reports = []
+    prior_month_reports = []
     company_names = []
     for company in companies:
         try:
@@ -1313,6 +1316,10 @@ async def _get_live_consolidated(params, qbo_report_name, report_type):
             if result.get("current"):
                 reports.append(result["current"])
                 company_names.append({"name": company["name"], "company_id": company["id"]})
+            if result.get("prior_year"):
+                prior_year_reports.append(result["prior_year"])
+            if result.get("prior_month"):
+                prior_month_reports.append(result["prior_month"])
         except Exception:
             pass
 
@@ -1320,7 +1327,12 @@ async def _get_live_consolidated(params, qbo_report_name, report_type):
         return {"current": None, "consolidated": True, "companies": [], "message": "Could not pull live data from any company."}
 
     merged = _merge_reports(reports)
-    return {"current": merged, "consolidated": True, "companies": company_names}
+    out = {"current": merged, "consolidated": True, "companies": company_names}
+    if prior_year_reports:
+        out["prior_year"] = _merge_reports(prior_year_reports) if len(prior_year_reports) > 1 else prior_year_reports[0]
+    if prior_month_reports:
+        out["prior_month"] = _merge_reports(prior_month_reports) if len(prior_month_reports) > 1 else prior_month_reports[0]
+    return out
 
 
 @app.post("/api/reports/balance-sheet")
@@ -1345,6 +1357,43 @@ async def get_cash_flow(params: ReportParams):
     if params.company_id:
         return await _get_live_report_for_company(params, "CashFlow", "cash_flow")
     return {"current": None, "message": "Select a company"}
+
+
+def _resolve_date_macro(date_macro: str, start_date: str = None, end_date: str = None):
+    """Resolve a QBO date_macro to explicit start/end dates for comparison calculations.
+    Returns (start_date, end_date) as YYYY-MM-DD strings."""
+    if start_date and end_date:
+        return start_date, end_date
+    now = datetime.now()
+    y, m, d = now.year, now.month, now.day
+    macros = {
+        "This Month": (f"{y}-{m:02d}-01", f"{y}-{m:02d}-{d:02d}"),
+        "Last Month": (
+            f"{y if m > 1 else y-1}-{(m-1 or 12):02d}-01",
+            f"{y if m > 1 else y-1}-{(m-1 or 12):02d}-{calendar.monthrange(y if m > 1 else y-1, m-1 or 12)[1]:02d}",
+        ),
+        "This Month-to-date": (f"{y}-{m:02d}-01", f"{y}-{m:02d}-{d:02d}"),
+        "This Fiscal Quarter": (
+            f"{y}-{((m-1)//3)*3+1:02d}-01",
+            f"{y}-{m:02d}-{d:02d}",
+        ),
+        "Last Fiscal Quarter": (
+            f"{y if ((m-1)//3)*3+1 > 1 else y-1}-{(((m-1)//3)*3-2 if ((m-1)//3)*3-2 > 0 else ((m-1)//3)*3+10):02d}-01",
+            f"{y}-{((m-1)//3)*3:02d}-{calendar.monthrange(y, ((m-1)//3)*3 or 12)[1]:02d}",
+        ),
+        "This Fiscal Quarter-to-date": (
+            f"{y}-{((m-1)//3)*3+1:02d}-01",
+            f"{y}-{m:02d}-{d:02d}",
+        ),
+        "This Fiscal Year": (f"{y}-01-01", f"{y}-{m:02d}-{d:02d}"),
+        "Last Fiscal Year": (f"{y-1}-01-01", f"{y-1}-12-31"),
+        "This Fiscal Year-to-date": (f"{y}-01-01", f"{y}-{m:02d}-{d:02d}"),
+        "Today": (f"{y}-{m:02d}-{d:02d}", f"{y}-{m:02d}-{d:02d}"),
+    }
+    if date_macro and date_macro in macros:
+        return macros[date_macro]
+    # Fallback: current month
+    return f"{y}-{m:02d}-01", f"{y}-{m:02d}-{d:02d}"
 
 
 async def _get_live_report_for_company(params, qbo_report_name, report_type):
@@ -1376,14 +1425,21 @@ async def _get_live_report_for_company(params, qbo_report_name, report_type):
         current = await qbo_get_report(db, params.company_id, qbo_report_name, qbo_params)
         result = {"current": current}
 
-        if params.compare_prior_year and params.start_date and params.end_date:
+        # Resolve effective dates for comparison — use explicit dates or derive from date_macro
+        eff_start = params.start_date
+        eff_end = params.end_date
+        if not eff_start or not eff_end:
+            eff_start, eff_end = _resolve_date_macro(
+                params.date_macro, params.start_date, params.end_date
+            )
+
+        if params.compare_prior_year and eff_start and eff_end:
             prior_params = dict(qbo_params)
-            start = datetime.strptime(params.start_date, "%Y-%m-%d")
-            end = datetime.strptime(params.end_date, "%Y-%m-%d")
+            start = datetime.strptime(eff_start, "%Y-%m-%d")
+            end = datetime.strptime(eff_end, "%Y-%m-%d")
             prior_params["start_date"] = start.replace(year=start.year - 1).strftime("%Y-%m-%d")
             prior_params["end_date"] = end.replace(year=end.year - 1).strftime("%Y-%m-%d")
-            if "date_macro" in prior_params:
-                del prior_params["date_macro"]
+            prior_params.pop("date_macro", None)
             try:
                 result["prior_year"] = await qbo_get_report(
                     db, params.company_id, qbo_report_name, prior_params
@@ -1391,20 +1447,20 @@ async def _get_live_report_for_company(params, qbo_report_name, report_type):
             except Exception:
                 result["prior_year"] = None
 
-        if params.compare_prior_month and params.start_date and params.end_date:
+        if params.compare_prior_month and eff_start and eff_end:
             prior_params = dict(qbo_params)
-            start = datetime.strptime(params.start_date, "%Y-%m-%d")
-            end = datetime.strptime(params.end_date, "%Y-%m-%d")
+            start = datetime.strptime(eff_start, "%Y-%m-%d")
+            end = datetime.strptime(eff_end, "%Y-%m-%d")
+            # Calculate prior month start
             m = start.month - 1 or 12
             y = start.year if start.month > 1 else start.year - 1
-            pm_start = start.replace(year=y, month=m)
-            m2 = end.month - 1 or 12
-            y2 = end.year if end.month > 1 else end.year - 1
-            pm_end = end.replace(year=y2, month=m2)
+            pm_start = start.replace(year=y, month=m, day=1)
+            # Calculate prior month end (last day of prior month)
+            last_day = calendar.monthrange(y, m)[1]
+            pm_end = start.replace(year=y, month=m, day=min(end.day, last_day))
             prior_params["start_date"] = pm_start.strftime("%Y-%m-%d")
             prior_params["end_date"] = pm_end.strftime("%Y-%m-%d")
-            if "date_macro" in prior_params:
-                del prior_params["date_macro"]
+            prior_params.pop("date_macro", None)
             try:
                 result["prior_month"] = await qbo_get_report(
                     db, params.company_id, qbo_report_name, prior_params
