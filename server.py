@@ -2215,6 +2215,22 @@ async def create_ic_template(req: ICTemplateRequest):
     return {"id": tid}
 
 
+@app.put("/api/intercompany/templates/{template_id}")
+async def update_ic_template(template_id: str, req: ICTemplateRequest):
+    db = get_db()
+    db.execute(
+        """UPDATE ic_templates SET name=?, source_company_id=?, dest_company_id=?, entry_type=?,
+           source_debit_account=?, source_credit_account=?, dest_debit_account=?, dest_credit_account=?, description=?
+           WHERE id=?""",
+        (req.name, req.source_company_id, req.dest_company_id, req.entry_type,
+         req.source_debit_account, req.source_credit_account,
+         req.dest_debit_account, req.dest_credit_account, req.description, template_id),
+    )
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
 @app.delete("/api/intercompany/templates/{template_id}")
 async def delete_ic_template(template_id: str):
     db = get_db()
