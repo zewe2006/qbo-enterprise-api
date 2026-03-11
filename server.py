@@ -1325,6 +1325,7 @@ class ReportParams(BaseModel):
     compare_prior_month: Optional[bool] = False
     company_id: Optional[str] = None  # specific company UUID | "all" for consolidated
     company_ids: Optional[list] = None  # list of company UUIDs for multi-select consolidated
+    by_company: Optional[bool] = False  # return per-company breakdown alongside consolidated total
 
 
 @app.post("/api/reports/profit-loss")
@@ -1364,6 +1365,8 @@ async def _get_live_consolidated(params, qbo_report_name, report_type):
     prior_year_reports = []
     prior_month_reports = []
     company_names = []
+    # Per-company data for by_company view
+    per_company_reports = {}  # keyed by company name
     for company in companies:
         try:
             result = await _get_live_report_for_company(
@@ -1382,6 +1385,9 @@ async def _get_live_consolidated(params, qbo_report_name, report_type):
             if result.get("current") and _has_report_data(result["current"]):
                 reports.append(result["current"])
                 company_names.append({"name": company["name"], "company_id": company["id"]})
+                # Store per-company report for by_company view
+                if params.by_company:
+                    per_company_reports[company["name"]] = result["current"]
             # Don't filter comparison reports — empty prior period ($0) is valid data
             if result.get("prior_year"):
                 prior_year_reports.append(result["prior_year"])
@@ -1395,6 +1401,15 @@ async def _get_live_consolidated(params, qbo_report_name, report_type):
 
     merged = _merge_reports(reports)
     out = {"current": merged, "consolidated": True, "companies": company_names}
+
+    # Include per-company breakdown for by_company view
+    if params.by_company and per_company_reports:
+        # Build a flat lookup for each company: account_name -> value
+        company_breakdowns = {}
+        for cname, creport in per_company_reports.items():
+            company_breakdowns[cname] = _build_flat_lookup(creport)
+        out["company_breakdowns"] = company_breakdowns
+
     if params.compare_prior_year:
         if prior_year_reports:
             m = _merge_reports(prior_year_reports) if len(prior_year_reports) > 1 else prior_year_reports[0]
@@ -1672,6 +1687,37 @@ def _has_report_data(report):
     if len(cols) < 2:
         return False
     return True
+
+
+def _build_flat_lookup(report):
+    """Build a flat dict mapping account names to their numeric values from a QBO report.
+    Used for the by-company view to provide per-company breakdowns."""
+    lookup = {}
+    if not report:
+        return lookup
+    def walk(rows):
+        for row in rows:
+            if row.get("ColData"):
+                name = row["ColData"][0].get("value", "")
+                val = row["ColData"][1].get("value", "0") if len(row["ColData"]) > 1 else "0"
+                if name:
+                    try:
+                        lookup[name] = float(val or "0")
+                    except (ValueError, TypeError):
+                        lookup[name] = 0.0
+            if row.get("Summary", {}).get("ColData"):
+                sc = row["Summary"]["ColData"]
+                name = sc[0].get("value", "") if sc else ""
+                val = sc[1].get("value", "0") if len(sc) > 1 else "0"
+                if name:
+                    try:
+                        lookup[name] = float(val or "0")
+                    except (ValueError, TypeError):
+                        lookup[name] = 0.0
+            if row.get("Rows", {}).get("Row"):
+                walk(row["Rows"]["Row"])
+    walk((report.get("Rows", {}) or {}).get("Row", []))
+    return lookup
 
 
 def _merge_reports(reports):
