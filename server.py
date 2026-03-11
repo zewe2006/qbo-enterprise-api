@@ -1708,6 +1708,63 @@ async def post_ic_entry(entry_id: str):
     }
 
 
+@app.put("/api/intercompany/{entry_id}")
+async def update_ic_entry(entry_id: str, req: ICEntryRequest):
+    db = get_db()
+    entry = db.execute("SELECT * FROM intercompany_entries WHERE id = ?", (entry_id,)).fetchone()
+    if not entry:
+        db.close()
+        raise HTTPException(status_code=404, detail="Entry not found")
+    if entry["status"] == "posted":
+        db.close()
+        raise HTTPException(status_code=400, detail="Cannot edit a posted entry")
+
+    lines = req.lines
+
+    # Validate debit/credit balance per side
+    for side in ["source", "dest"]:
+        side_lines = [l for l in lines if l.side == side]
+        if not side_lines:
+            continue
+        total_debit = sum(l.amount for l in side_lines if l.posting_type == "Debit")
+        total_credit = sum(l.amount for l in side_lines if l.posting_type == "Credit")
+        if round(total_debit, 2) != round(total_credit, 2):
+            db.close()
+            raise HTTPException(
+                status_code=400,
+                detail=f"{side.capitalize()} side is unbalanced: Debits ${total_debit:.2f} != Credits ${total_credit:.2f}"
+            )
+
+    total_amount = sum(l.amount for l in lines if l.posting_type == "Debit" and l.side == "source")
+    if total_amount == 0:
+        total_amount = sum(l.amount for l in lines if l.posting_type == "Debit")
+
+    # Update header
+    db.execute(
+        """UPDATE intercompany_entries
+           SET source_company_id=?, dest_company_id=?, entry_type=?, amount=?,
+               description=?, date=?
+           WHERE id=?""",
+        (req.source_company_id, req.dest_company_id, req.entry_type,
+         total_amount, req.description, req.date, entry_id),
+    )
+
+    # Replace lines
+    db.execute("DELETE FROM ic_entry_lines WHERE entry_id = ?", (entry_id,))
+    for line in lines:
+        line_id = str(uuid.uuid4())
+        db.execute(
+            """INSERT INTO ic_entry_lines (id, entry_id, side, posting_type, account_name, amount, entity_id, description)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (line_id, entry_id, line.side, line.posting_type, line.account_name,
+             line.amount, line.entity_id, line.description),
+        )
+
+    db.commit()
+    db.close()
+    return {"id": entry_id, "status": "pending"}
+
+
 @app.delete("/api/intercompany/{entry_id}")
 async def delete_ic_entry(entry_id: str):
     db = get_db()
