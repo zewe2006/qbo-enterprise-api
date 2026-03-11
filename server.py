@@ -31,7 +31,7 @@ from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import List, Optional
 
 # ---------- QBO Config ----------
 
@@ -181,6 +181,17 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (source_company_id) REFERENCES companies(id),
             FOREIGN KEY (dest_company_id) REFERENCES companies(id)
+        );
+        CREATE TABLE IF NOT EXISTS ic_entry_lines (
+            id TEXT PRIMARY KEY,
+            entry_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            posting_type TEXT NOT NULL,
+            account_name TEXT NOT NULL,
+            amount REAL NOT NULL,
+            entity_id TEXT,
+            description TEXT,
+            FOREIGN KEY (entry_id) REFERENCES intercompany_entries(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS ic_templates (
             id TEXT PRIMARY KEY,
@@ -1462,17 +1473,28 @@ async def delete_account_mapping(mapping_id: str):
 #  INTERCOMPANY JOURNAL ENTRIES
 # =====================================================================
 
+class ICEntryLine(BaseModel):
+    side: str  # "source" or "dest"
+    posting_type: str  # "Debit" or "Credit"
+    account_name: str
+    amount: float
+    entity_id: Optional[str] = None
+    description: Optional[str] = None
+
+
 class ICEntryRequest(BaseModel):
     source_company_id: str
     dest_company_id: str
     entry_type: str
-    amount: float
     description: str
     date: str
-    source_debit_account: str
-    source_credit_account: str
-    dest_debit_account: str
-    dest_credit_account: str
+    lines: List[ICEntryLine]
+    # Legacy single-line fields (kept for backward compat)
+    amount: Optional[float] = None
+    source_debit_account: Optional[str] = None
+    source_credit_account: Optional[str] = None
+    dest_debit_account: Optional[str] = None
+    dest_credit_account: Optional[str] = None
     source_debit_entity_id: Optional[str] = None
     source_credit_entity_id: Optional[str] = None
     dest_debit_entity_id: Optional[str] = None
@@ -1489,26 +1511,61 @@ async def list_ic_entries():
            LEFT JOIN companies dc ON ie.dest_company_id = dc.id
            ORDER BY ie.created_at DESC"""
     ).fetchall()
+    entries = []
+    for r in rows:
+        entry = dict(r)
+        lines = db.execute(
+            "SELECT * FROM ic_entry_lines WHERE entry_id = ? ORDER BY side, posting_type",
+            (entry["id"],)
+        ).fetchall()
+        entry["lines"] = [dict(l) for l in lines]
+        entries.append(entry)
     db.close()
-    return [dict(r) for r in rows]
+    return entries
 
 @app.post("/api/intercompany")
 async def create_ic_entry(req: ICEntryRequest):
     db = get_db()
+    lines = req.lines
+
+    # Validate debit/credit balance per side
+    for side in ["source", "dest"]:
+        side_lines = [l for l in lines if l.side == side]
+        if not side_lines:
+            continue
+        total_debit = sum(l.amount for l in side_lines if l.posting_type == "Debit")
+        total_credit = sum(l.amount for l in side_lines if l.posting_type == "Credit")
+        if round(total_debit, 2) != round(total_credit, 2):
+            db.close()
+            raise HTTPException(
+                status_code=400,
+                detail=f"{side.capitalize()} side is unbalanced: Debits ${total_debit:.2f} != Credits ${total_credit:.2f}"
+            )
+
+    # Total amount = sum of debits on source side (for display)
+    total_amount = sum(l.amount for l in lines if l.posting_type == "Debit" and l.side == "source")
+    if total_amount == 0:
+        total_amount = sum(l.amount for l in lines if l.posting_type == "Debit")
+
     entry_id = str(uuid.uuid4())
     db.execute(
         """INSERT INTO intercompany_entries
-           (id, source_company_id, dest_company_id, entry_type, amount, description, date,
-            source_debit_account, source_credit_account, dest_debit_account, dest_credit_account,
-            source_debit_entity_id, source_credit_entity_id, dest_debit_entity_id, dest_credit_entity_id,
-            status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
-        (entry_id, req.source_company_id, req.dest_company_id, req.entry_type, req.amount,
-         req.description, req.date, req.source_debit_account, req.source_credit_account,
-         req.dest_debit_account, req.dest_credit_account,
-         req.source_debit_entity_id, req.source_credit_entity_id,
-         req.dest_debit_entity_id, req.dest_credit_entity_id),
+           (id, source_company_id, dest_company_id, entry_type, amount, description, date, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')""",
+        (entry_id, req.source_company_id, req.dest_company_id, req.entry_type,
+         total_amount, req.description, req.date),
     )
+
+    # Insert lines
+    for line in lines:
+        line_id = str(uuid.uuid4())
+        db.execute(
+            """INSERT INTO ic_entry_lines (id, entry_id, side, posting_type, account_name, amount, entity_id, description)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (line_id, entry_id, line.side, line.posting_type, line.account_name,
+             line.amount, line.entity_id, line.description),
+        )
+
     db.commit()
     db.close()
     return {"id": entry_id, "status": "pending"}
@@ -1521,6 +1578,13 @@ async def post_ic_entry(entry_id: str):
         db.close()
         raise HTTPException(status_code=404, detail="Entry not found")
     entry = dict(entry)
+
+    # Fetch lines for this entry
+    lines = db.execute(
+        "SELECT * FROM ic_entry_lines WHERE entry_id = ? ORDER BY side, posting_type",
+        (entry_id,)
+    ).fetchall()
+    lines = [dict(l) for l in lines]
 
     errors = []
     source_je_id = None
@@ -1540,13 +1604,12 @@ async def post_ic_entry(entry_id: str):
             return row["qbo_account_id"], row["account_type"]
         return None, None
 
-    # --- Helper: build a single JE line ---
-    def build_je_line(posting_type, amount, account_ref, account_type, entity_id, entity_type, description):
+    # --- Helper: build a single QBO JE line ---
+    def build_je_line(posting_type, amount, account_ref, account_type, entity_id, description):
         detail = {
             "PostingType": posting_type,
             "AccountRef": {"value": account_ref}
         }
-        # QBO requires EntityRef for AR (Customer) and AP (Vendor) accounts
         if account_type == "Accounts Receivable" and entity_id:
             detail["Entity"] = {"EntityRef": {"value": entity_id}, "Type": "Customer"}
         elif account_type == "Accounts Payable" and entity_id:
@@ -1558,81 +1621,70 @@ async def post_ic_entry(entry_id: str):
             "JournalEntryLineDetail": detail
         }
 
-    # --- Helper: build QBO JournalEntry payload ---
-    def build_je_payload(txn_date, amount, debit_ref, debit_type, credit_ref, credit_type,
-                         debit_entity_id, credit_entity_id, description):
-        line = []
-        if debit_ref:
-            line.append(build_je_line("Debit", amount, debit_ref, debit_type,
-                                       debit_entity_id, None, description))
-        if credit_ref:
-            line.append(build_je_line("Credit", amount, credit_ref, credit_type,
-                                       credit_entity_id, None, description))
-        return {
-            "TxnDate": txn_date,
-            "Line": line,
-            "PrivateNote": f"Intercompany: {description or entry['entry_type']}"
+    # --- Build and post JE per side ---
+    for side, company_id_key in [("source", "source_company_id"), ("dest", "dest_company_id")]:
+        side_lines = [l for l in lines if l["side"] == side]
+        if not side_lines:
+            # Fallback: legacy entries without lines table
+            if side == "source" and entry.get("source_debit_account") and entry.get("source_credit_account"):
+                side_lines = [
+                    {"posting_type": "Debit", "account_name": entry["source_debit_account"],
+                     "amount": entry["amount"], "entity_id": entry.get("source_debit_entity_id"), "description": entry["description"]},
+                    {"posting_type": "Credit", "account_name": entry["source_credit_account"],
+                     "amount": entry["amount"], "entity_id": entry.get("source_credit_entity_id"), "description": entry["description"]},
+                ]
+            elif side == "dest" and entry.get("dest_debit_account") and entry.get("dest_credit_account"):
+                side_lines = [
+                    {"posting_type": "Debit", "account_name": entry["dest_debit_account"],
+                     "amount": entry["amount"], "entity_id": entry.get("dest_debit_entity_id"), "description": entry["description"]},
+                    {"posting_type": "Credit", "account_name": entry["dest_credit_account"],
+                     "amount": entry["amount"], "entity_id": entry.get("dest_credit_entity_id"), "description": entry["description"]},
+                ]
+            else:
+                continue
+
+        company_id = entry[company_id_key]
+        je_lines = []
+        missing_accounts = []
+
+        for sl in side_lines:
+            acct_id, acct_type = find_account_info(company_id, sl["account_name"])
+            if not acct_id:
+                missing_accounts.append(sl["account_name"])
+                continue
+            je_lines.append(build_je_line(
+                sl["posting_type"], sl["amount"], acct_id, acct_type,
+                sl.get("entity_id"), sl.get("description") or entry["description"]
+            ))
+
+        if missing_accounts:
+            errors.append(f"{side.capitalize()}: account(s) not found: {', '.join(missing_accounts)}")
+            continue
+
+        if not je_lines:
+            continue
+
+        payload = {
+            "TxnDate": entry["date"],
+            "Line": je_lines,
+            "PrivateNote": f"Intercompany: {entry['description'] or entry['entry_type']}"
         }
 
-    try:
-        # --- Post to Source Company ---
-        src_debit_id, src_debit_type = find_account_info(entry["source_company_id"], entry["source_debit_account"])
-        src_credit_id, src_credit_type = find_account_info(entry["source_company_id"], entry["source_credit_account"])
-
-        if src_debit_id and src_credit_id:
-            payload = build_je_payload(
-                entry["date"], entry["amount"],
-                src_debit_id, src_debit_type,
-                src_credit_id, src_credit_type,
-                entry.get("source_debit_entity_id"),
-                entry.get("source_credit_entity_id"),
-                entry["description"]
-            )
+        try:
             result = await qbo_api_call(
-                db, entry["source_company_id"],
+                db, company_id,
                 "journalentry?minorversion=65",
                 method="POST", params=payload
             )
-            source_je_id = result.get("JournalEntry", {}).get("Id")
-        else:
-            missing = []
-            if not src_debit_id:
-                missing.append(f"source debit '{entry['source_debit_account']}'")
-            if not src_credit_id:
-                missing.append(f"source credit '{entry['source_credit_account']}'")
-            errors.append(f"Could not find QBO account ID for: {', '.join(missing)}")
-
-        # --- Post to Destination Company ---
-        dest_debit_id, dest_debit_type = find_account_info(entry["dest_company_id"], entry["dest_debit_account"])
-        dest_credit_id, dest_credit_type = find_account_info(entry["dest_company_id"], entry["dest_credit_account"])
-
-        if dest_debit_id and dest_credit_id:
-            payload = build_je_payload(
-                entry["date"], entry["amount"],
-                dest_debit_id, dest_debit_type,
-                dest_credit_id, dest_credit_type,
-                entry.get("dest_debit_entity_id"),
-                entry.get("dest_credit_entity_id"),
-                entry["description"]
-            )
-            result = await qbo_api_call(
-                db, entry["dest_company_id"],
-                "journalentry?minorversion=65",
-                method="POST", params=payload
-            )
-            dest_je_id = result.get("JournalEntry", {}).get("Id")
-        else:
-            missing = []
-            if not dest_debit_id:
-                missing.append(f"dest debit '{entry['dest_debit_account']}'")
-            if not dest_credit_id:
-                missing.append(f"dest credit '{entry['dest_credit_account']}'")
-            errors.append(f"Could not find QBO account ID for: {', '.join(missing)}")
-
-    except HTTPException as he:
-        errors.append(f"QBO API error: {he.detail}")
-    except Exception as ex:
-        errors.append(f"Error: {str(ex)}")
+            je_id = result.get("JournalEntry", {}).get("Id")
+            if side == "source":
+                source_je_id = je_id
+            else:
+                dest_je_id = je_id
+        except HTTPException as he:
+            errors.append(f"{side.capitalize()} QBO error: {he.detail}")
+        except Exception as ex:
+            errors.append(f"{side.capitalize()} error: {str(ex)}")
 
     # Update status based on results
     if errors and not source_je_id and not dest_je_id:
@@ -1663,6 +1715,7 @@ async def delete_ic_entry(entry_id: str):
     if not entry:
         db.close()
         raise HTTPException(status_code=404, detail="Entry not found")
+    db.execute("DELETE FROM ic_entry_lines WHERE entry_id = ?", (entry_id,))
     db.execute("DELETE FROM intercompany_entries WHERE id = ?", (entry_id,))
     db.commit()
     db.close()
