@@ -1455,6 +1455,115 @@ async def get_cash_flow(params: ReportParams):
     return {"current": None, "message": "Select a company"}
 
 
+class TransactionDetailParams(BaseModel):
+    account_name: str
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    date_macro: Optional[str] = None
+    accounting_method: Optional[str] = "Accrual"
+    company_id: Optional[str] = None  # specific company UUID
+    company_ids: Optional[list] = None  # for consolidated drill-down
+
+
+@app.post("/api/reports/transaction-detail")
+async def get_transaction_detail(params: TransactionDetailParams):
+    """Drill down into a specific account — returns transaction-level detail from the QBO
+    GeneralLedger report, across one or more companies."""
+    db = get_db()
+
+    # Determine which companies to query
+    if params.company_id == "all" or (not params.company_id):
+        companies = db.execute(
+            "SELECT id, name, qbo_realm_id, refresh_token FROM companies "
+            "WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != ''"
+        ).fetchall()
+        if params.company_ids and len(params.company_ids) > 0:
+            selected = set(params.company_ids)
+            companies = [c for c in companies if c["id"] in selected]
+    elif params.company_id:
+        companies = db.execute(
+            "SELECT id, name, qbo_realm_id, refresh_token FROM companies WHERE id=?",
+            (params.company_id,)
+        ).fetchall()
+    else:
+        db.close()
+        return {"transactions": [], "message": "Select a company"}
+
+    all_transactions = []
+    for company in companies:
+        try:
+            qbo_params = {
+                "account": params.account_name,
+                "columns": "tx_date,txn_type,doc_num,name,memo,account_name,subt_nat_amount,rbal_nat_amount,debt_amt,credit_amt,nat_open_bal,nat_foreign_open_bal",
+                "sort_by": "tx_date",
+                "sort_order": "ascend",
+            }
+            if params.accounting_method:
+                qbo_params["accounting_method"] = params.accounting_method
+            if params.date_macro:
+                qbo_params["date_macro"] = params.date_macro
+            if params.start_date:
+                qbo_params["start_date"] = params.start_date
+            if params.end_date:
+                qbo_params["end_date"] = params.end_date
+
+            report = await qbo_get_report(db, company["id"], "GeneralLedger", qbo_params)
+            transactions = _parse_gl_transactions(report, company["name"])
+            all_transactions.extend(transactions)
+        except Exception as e:
+            logger.warning("GL drill-down failed for %s: %s", company["name"], str(e)[:200])
+
+    db.close()
+
+    # Sort all transactions by date
+    all_transactions.sort(key=lambda t: t.get("date", ""))
+
+    return {
+        "transactions": all_transactions,
+        "account_name": params.account_name,
+        "count": len(all_transactions),
+    }
+
+
+def _parse_gl_transactions(report: dict, company_name: str) -> list:
+    """Parse a QBO GeneralLedger report into flat transaction rows."""
+    transactions = []
+    if not report:
+        return transactions
+
+    # Get column definitions
+    columns = []
+    for col in report.get("Columns", {}).get("Column", []):
+        col_type = col.get("ColTitle", "").strip()
+        columns.append(col_type)
+
+    def walk_rows(rows_obj):
+        for row in rows_obj.get("Row", []):
+            # Data rows have ColData directly
+            if row.get("ColData"):
+                txn = {"company": company_name}
+                for i, cd in enumerate(row["ColData"]):
+                    val = cd.get("value", "")
+                    col_title = columns[i] if i < len(columns) else f"col_{i}"
+                    txn[col_title] = val
+                transactions.append(txn)
+            # Sections have nested Rows
+            if row.get("Rows"):
+                walk_rows(row["Rows"])
+            # Header rows in sections
+            if row.get("Header", {}).get("ColData"):
+                # Skip header rows (account name groupings)
+                pass
+            # Summary rows
+            if row.get("Summary", {}).get("ColData"):
+                # Skip summary rows (they're totals)
+                pass
+
+    rows = report.get("Rows", {})
+    walk_rows(rows)
+    return transactions
+
+
 def _resolve_date_macro(date_macro: str, start_date: str = None, end_date: str = None):
     """Resolve a QBO date_macro to explicit start/end dates for comparison calculations.
     Returns (start_date, end_date) as YYYY-MM-DD strings."""
