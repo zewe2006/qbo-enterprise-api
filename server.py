@@ -71,12 +71,18 @@ FRONTEND_ORIGIN = os.environ.get(
 
 # ---------- Database ----------
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "qbo_enterprise.db")
-# DATA_DIR: look for data/ next to server.py first, then one level up (for local dev with api/ subfolder)
+# Use Railway persistent volume if available, otherwise local directory
 _here = os.path.dirname(__file__)
-DATA_DIR = os.path.join(_here, "data")
-if not os.path.isdir(DATA_DIR):
-    DATA_DIR = os.path.join(os.path.dirname(_here), "data")
+_volume_path = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+if _volume_path and os.path.isdir(_volume_path):
+    DB_PATH = os.path.join(_volume_path, "qbo_enterprise.db")
+    DATA_DIR = os.path.join(_volume_path, "data")
+    os.makedirs(DATA_DIR, exist_ok=True)
+else:
+    DB_PATH = os.path.join(_here, "qbo_enterprise.db")
+    DATA_DIR = os.path.join(_here, "data")
+    if not os.path.isdir(DATA_DIR):
+        DATA_DIR = os.path.join(os.path.dirname(_here), "data")
 
 
 def get_db():
