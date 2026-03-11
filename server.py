@@ -211,6 +211,15 @@ def init_db():
             redirect_uri TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS user_company_access (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            company_id TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(user_id, company_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+        );
     """)
 
     # Safe column additions
@@ -566,16 +575,55 @@ class RegisterRequest(BaseModel):
     password: str
     name: str
 
+class CreateUserRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+    role: str = "viewer"  # "admin" or "viewer"
+    company_ids: List[str] = []  # company IDs this user can access
+
+class UpdateUserRequest(BaseModel):
+    email: Optional[str] = None
+    name: Optional[str] = None
+    role: Optional[str] = None
+    password: Optional[str] = None
+    company_ids: Optional[List[str]] = None
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+def _extract_token(authorization: str) -> str:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="No token")
+    return authorization.replace("Bearer ", "")
+
+
 def get_current_user(token: str):
     db = get_db()
     session = db.execute("SELECT user_id FROM sessions WHERE token = ?", (token,)).fetchone()
     if not session:
+        db.close()
         raise HTTPException(status_code=401, detail="Invalid session")
     user = db.execute("SELECT * FROM users WHERE id = ?", (session["user_id"],)).fetchone()
-    db.close()
     if not user:
+        db.close()
         raise HTTPException(status_code=401, detail="User not found")
-    return dict(user)
+    # Get company access list
+    access_rows = db.execute(
+        "SELECT company_id FROM user_company_access WHERE user_id = ?", (user["id"],)
+    ).fetchall()
+    db.close()
+    u = dict(user)
+    u["company_ids"] = [r["company_id"] for r in access_rows]
+    return u
+
+
+def require_admin(user: dict):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
 
 @app.post("/api/auth/login")
 async def login(req: LoginRequest):
@@ -591,39 +639,33 @@ async def login(req: LoginRequest):
     token = str(uuid.uuid4())
     db.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user["id"]))
     db.commit()
+    # Get company access
+    access_rows = db.execute(
+        "SELECT company_id FROM user_company_access WHERE user_id = ?", (user["id"],)
+    ).fetchall()
     db.close()
     return {
         "token": token,
-        "user": {"id": user["id"], "email": user["email"], "name": user["name"], "role": user["role"]},
+        "user": {
+            "id": user["id"], "email": user["email"], "name": user["name"],
+            "role": user["role"],
+            "company_ids": [r["company_id"] for r in access_rows],
+        },
     }
 
 @app.post("/api/auth/register")
 async def register(req: RegisterRequest):
-    db = get_db()
-    existing = db.execute("SELECT id FROM users WHERE email = ?", (req.email,)).fetchone()
-    if existing:
-        db.close()
-        raise HTTPException(status_code=409, detail="Email already registered")
-    user_id = str(uuid.uuid4())
-    pw_hash = hashlib.sha256(req.password.encode()).hexdigest()
-    db.execute(
-        "INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)",
-        (user_id, req.email, pw_hash, req.name),
-    )
-    db.commit()
-    token = str(uuid.uuid4())
-    db.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
-    db.commit()
-    db.close()
-    return {"token": token, "user": {"id": user_id, "email": req.email, "name": req.name, "role": "user"}}
+    # Self-registration disabled — admin-only
+    raise HTTPException(status_code=403, detail="Self-registration is disabled. Contact an admin.")
 
 @app.get("/api/auth/me")
 async def get_me(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="No token")
-    token = authorization.replace("Bearer ", "")
+    token = _extract_token(authorization)
     user = get_current_user(token)
-    return {"id": user["id"], "email": user["email"], "name": user["name"], "role": user["role"]}
+    return {
+        "id": user["id"], "email": user["email"], "name": user["name"],
+        "role": user["role"], "company_ids": user.get("company_ids", []),
+    }
 
 @app.post("/api/auth/logout")
 async def logout(authorization: str = Header(None)):
@@ -634,6 +676,129 @@ async def logout(authorization: str = Header(None)):
         db.commit()
         db.close()
     return {"ok": True}
+
+@app.post("/api/auth/change-password")
+async def change_password(req: ChangePasswordRequest, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    db = get_db()
+    old_hash = hashlib.sha256(req.current_password.encode()).hexdigest()
+    if user["password_hash"] != old_hash:
+        db.close()
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    new_hash = hashlib.sha256(req.new_password.encode()).hexdigest()
+    db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_hash, user["id"]))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+# =====================================================================
+#  USER MANAGEMENT (Admin Only)
+# =====================================================================
+
+@app.get("/api/users")
+async def list_users(authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    db = get_db()
+    rows = db.execute("SELECT id, email, name, role, created_at FROM users ORDER BY created_at").fetchall()
+    users = []
+    for r in rows:
+        u = dict(r)
+        access = db.execute(
+            "SELECT company_id FROM user_company_access WHERE user_id = ?", (u["id"],)
+        ).fetchall()
+        u["company_ids"] = [a["company_id"] for a in access]
+        users.append(u)
+    db.close()
+    return users
+
+@app.post("/api/users")
+async def create_user(req: CreateUserRequest, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    admin = get_current_user(token)
+    require_admin(admin)
+    if req.role not in ("admin", "viewer"):
+        raise HTTPException(status_code=400, detail="Role must be 'admin' or 'viewer'")
+    db = get_db()
+    existing = db.execute("SELECT id FROM users WHERE email = ?", (req.email,)).fetchone()
+    if existing:
+        db.close()
+        raise HTTPException(status_code=409, detail="Email already registered")
+    user_id = str(uuid.uuid4())
+    pw_hash = hashlib.sha256(req.password.encode()).hexdigest()
+    db.execute(
+        "INSERT INTO users (id, email, password_hash, name, role) VALUES (?, ?, ?, ?, ?)",
+        (user_id, req.email, pw_hash, req.name, req.role),
+    )
+    # Assign company access
+    for cid in req.company_ids:
+        db.execute(
+            "INSERT OR IGNORE INTO user_company_access (id, user_id, company_id) VALUES (?, ?, ?)",
+            (str(uuid.uuid4()), user_id, cid),
+        )
+    db.commit()
+    db.close()
+    return {"id": user_id, "email": req.email, "name": req.name, "role": req.role, "company_ids": req.company_ids}
+
+@app.put("/api/users/{user_id}")
+async def update_user(user_id: str, req: UpdateUserRequest, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    admin = get_current_user(token)
+    require_admin(admin)
+    db = get_db()
+    user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        db.close()
+        raise HTTPException(status_code=404, detail="User not found")
+    if req.email is not None:
+        dup = db.execute("SELECT id FROM users WHERE email = ? AND id != ?", (req.email, user_id)).fetchone()
+        if dup:
+            db.close()
+            raise HTTPException(status_code=409, detail="Email already in use")
+        db.execute("UPDATE users SET email = ? WHERE id = ?", (req.email, user_id))
+    if req.name is not None:
+        db.execute("UPDATE users SET name = ? WHERE id = ?", (req.name, user_id))
+    if req.role is not None:
+        if req.role not in ("admin", "viewer"):
+            db.close()
+            raise HTTPException(status_code=400, detail="Role must be 'admin' or 'viewer'")
+        db.execute("UPDATE users SET role = ? WHERE id = ?", (req.role, user_id))
+    if req.password is not None:
+        pw_hash = hashlib.sha256(req.password.encode()).hexdigest()
+        db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (pw_hash, user_id))
+    if req.company_ids is not None:
+        db.execute("DELETE FROM user_company_access WHERE user_id = ?", (user_id,))
+        for cid in req.company_ids:
+            db.execute(
+                "INSERT OR IGNORE INTO user_company_access (id, user_id, company_id) VALUES (?, ?, ?)",
+                (str(uuid.uuid4()), user_id, cid),
+            )
+    db.commit()
+    # Return updated user
+    updated = db.execute("SELECT id, email, name, role, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
+    access = db.execute("SELECT company_id FROM user_company_access WHERE user_id = ?", (user_id,)).fetchall()
+    db.close()
+    result = dict(updated)
+    result["company_ids"] = [a["company_id"] for a in access]
+    return result
+
+@app.delete("/api/users/{user_id}")
+async def delete_user(user_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    admin = get_current_user(token)
+    require_admin(admin)
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="Cannot delete yourself")
+    db = get_db()
+    db.execute("DELETE FROM user_company_access WHERE user_id = ?", (user_id,))
+    db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    db.commit()
+    db.close()
+    return {"deleted": user_id}
 
 
 # =====================================================================
@@ -872,7 +1037,9 @@ async def qbo_callback(request: Request, code: str = None, state: str = None,
 # =====================================================================
 
 @app.get("/api/companies")
-async def list_companies():
+async def list_companies(authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
     db = get_db()
     rows = db.execute(
         """SELECT id, name, legal_name, qbo_company_id, qbo_realm_id,
@@ -882,7 +1049,12 @@ async def list_companies():
            FROM companies ORDER BY name"""
     ).fetchall()
     db.close()
-    return [dict(r) for r in rows]
+    companies = [dict(r) for r in rows]
+    # Non-admin users only see companies they have access to
+    if user["role"] != "admin":
+        allowed = set(user.get("company_ids", []))
+        companies = [c for c in companies if c["id"] in allowed]
+    return companies
 
 
 @app.get("/api/companies/connected")
