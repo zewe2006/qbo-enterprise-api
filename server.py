@@ -1465,6 +1465,19 @@ async def post_ic_entry(entry_id: str):
     return {"id": entry_id, "status": "posted"}
 
 
+@app.delete("/api/intercompany/{entry_id}")
+async def delete_ic_entry(entry_id: str):
+    db = get_db()
+    entry = db.execute("SELECT * FROM intercompany_entries WHERE id = ?", (entry_id,)).fetchone()
+    if not entry:
+        db.close()
+        raise HTTPException(status_code=404, detail="Entry not found")
+    db.execute("DELETE FROM intercompany_entries WHERE id = ?", (entry_id,))
+    db.commit()
+    db.close()
+    return {"id": entry_id, "deleted": True}
+
+
 # =====================================================================
 #  IC TEMPLATES
 # =====================================================================
