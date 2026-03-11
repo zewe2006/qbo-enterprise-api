@@ -1269,10 +1269,12 @@ class ReportParams(BaseModel):
 @app.post("/api/reports/profit-loss")
 async def get_profit_loss(params: ReportParams):
     if params.company_id == "all":
-        result = _get_cached_report(params, "profit_loss")
-        if result.get("current") is None:
-            result = await _get_live_consolidated(params, "ProfitAndLoss", "profit_loss")
-        return result
+        wants_comparison = params.compare_prior_year or params.compare_prior_month
+        if not wants_comparison:
+            result = _get_cached_report(params, "profit_loss")
+            if result.get("current") is not None:
+                return result
+        return await _get_live_consolidated(params, "ProfitAndLoss", "profit_loss")
     if params.company_id:
         return await _get_live_report_for_company(params, "ProfitAndLoss", "profit_loss")
     return {"current": None, "message": "Select a company"}
@@ -1338,10 +1340,12 @@ async def _get_live_consolidated(params, qbo_report_name, report_type):
 @app.post("/api/reports/balance-sheet")
 async def get_balance_sheet(params: ReportParams):
     if params.company_id == "all":
-        result = _get_cached_report(params, "balance_sheet")
-        if result.get("current") is None:
-            result = await _get_live_consolidated(params, "BalanceSheet", "balance_sheet")
-        return result
+        wants_comparison = params.compare_prior_year or params.compare_prior_month
+        if not wants_comparison:
+            result = _get_cached_report(params, "balance_sheet")
+            if result.get("current") is not None:
+                return result
+        return await _get_live_consolidated(params, "BalanceSheet", "balance_sheet")
     if params.company_id:
         return await _get_live_report_for_company(params, "BalanceSheet", "balance_sheet")
     return {"current": None, "message": "Select a company"}
@@ -1350,10 +1354,12 @@ async def get_balance_sheet(params: ReportParams):
 @app.post("/api/reports/cash-flow")
 async def get_cash_flow(params: ReportParams):
     if params.company_id == "all":
-        result = _get_cached_report(params, "cash_flow")
-        if result.get("current") is None:
-            result = await _get_live_consolidated(params, "CashFlow", "cash_flow")
-        return result
+        wants_comparison = params.compare_prior_year or params.compare_prior_month
+        if not wants_comparison:
+            result = _get_cached_report(params, "cash_flow")
+            if result.get("current") is not None:
+                return result
+        return await _get_live_consolidated(params, "CashFlow", "cash_flow")
     if params.company_id:
         return await _get_live_report_for_company(params, "CashFlow", "cash_flow")
     return {"current": None, "message": "Select a company"}
