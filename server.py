@@ -1758,7 +1758,14 @@ async def dashboard_summary():
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "time": datetime.now().isoformat(), "qbo_env": QBO_ENVIRONMENT}
+    return {
+        "status": "ok",
+        "time": datetime.now().isoformat(),
+        "qbo_env": QBO_ENVIRONMENT,
+        "db_path": DB_PATH,
+        "volume_mounted": bool(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")),
+        "db_exists": os.path.isfile(DB_PATH),
+    }
 
 
 if __name__ == "__main__":
