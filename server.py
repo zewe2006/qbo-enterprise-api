@@ -1321,9 +1321,10 @@ async def _get_live_consolidated(params, qbo_report_name, report_type):
             if result.get("current") and _has_report_data(result["current"]):
                 reports.append(result["current"])
                 company_names.append({"name": company["name"], "company_id": company["id"]})
-            if result.get("prior_year") and _has_report_data(result["prior_year"]):
+            # Don't filter comparison reports — empty prior period ($0) is valid data
+            if result.get("prior_year"):
                 prior_year_reports.append(result["prior_year"])
-            if result.get("prior_month") and _has_report_data(result["prior_month"]):
+            if result.get("prior_month"):
                 prior_month_reports.append(result["prior_month"])
         except Exception:
             pass
@@ -1333,10 +1334,18 @@ async def _get_live_consolidated(params, qbo_report_name, report_type):
 
     merged = _merge_reports(reports)
     out = {"current": merged, "consolidated": True, "companies": company_names}
-    if prior_year_reports:
-        out["prior_year"] = _merge_reports(prior_year_reports) if len(prior_year_reports) > 1 else prior_year_reports[0]
-    if prior_month_reports:
-        out["prior_month"] = _merge_reports(prior_month_reports) if len(prior_month_reports) > 1 else prior_month_reports[0]
+    if params.compare_prior_year:
+        if prior_year_reports:
+            m = _merge_reports(prior_year_reports) if len(prior_year_reports) > 1 else prior_year_reports[0]
+            out["prior_year"] = m if m else _zero_report(merged)
+        else:
+            out["prior_year"] = _zero_report(merged)
+    if params.compare_prior_month:
+        if prior_month_reports:
+            m = _merge_reports(prior_month_reports) if len(prior_month_reports) > 1 else prior_month_reports[0]
+            out["prior_month"] = m if m else _zero_report(merged)
+        else:
+            out["prior_month"] = _zero_report(merged)
     return out
 
 
@@ -1564,6 +1573,29 @@ def _get_cached_report(params, report_type):
         if not row:
             return {"current": None, "message": "No cached data for this period. Sync the company first."}
         return {"current": json.loads(row["data_json"]), "cached_at": row["cached_at"]}
+
+
+def _zero_report(report):
+    """Create a zeroed-out copy of a report structure for comparison when prior period has no data."""
+    if not report:
+        return None
+    zeroed = json.loads(json.dumps(report))
+
+    def _zero_rows(rows):
+        for row in rows:
+            if row.get("ColData"):
+                for i in range(1, len(row["ColData"])):
+                    row["ColData"][i]["value"] = "0"
+            if row.get("Summary", {}).get("ColData"):
+                for i in range(1, len(row["Summary"]["ColData"])):
+                    row["Summary"]["ColData"][i]["value"] = "0"
+            if row.get("Header", {}).get("ColData"):
+                pass  # Keep header labels
+            if row.get("Rows", {}).get("Row"):
+                _zero_rows(row["Rows"]["Row"])
+
+    _zero_rows(zeroed.get("Rows", {}).get("Row", []))
+    return zeroed
 
 
 def _has_report_data(report):
