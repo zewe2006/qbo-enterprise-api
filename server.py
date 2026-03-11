@@ -20,6 +20,7 @@ import base64
 import calendar
 import hashlib
 import json
+import logging
 import os
 import secrets
 import sqlite3
@@ -27,6 +28,16 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
+
+# ---------- Logging ----------
+
+# Structured logging — all QBO API interactions, errors, and intuit_tid values
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("enterpriseledger")
 
 import httpx
 from fastapi import FastAPI, HTTPException, Header, Request
@@ -438,10 +449,16 @@ async def _refresh_access_token(db, company_id: str, refresh_token: str) -> str:
             },
         )
 
+    intuit_tid = resp.headers.get("intuit_tid", "N/A")
+
     if resp.status_code != 200:
         # Mark company as needing re-auth
         db.execute("UPDATE companies SET status='auth_expired' WHERE id=?", (company_id,))
         db.commit()
+        logger.error(
+            "Token refresh FAILED | company=%s | status=%d | intuit_tid=%s | body=%s",
+            company_id, resp.status_code, intuit_tid, resp.text[:300],
+        )
         raise HTTPException(
             status_code=401,
             detail=f"Token refresh failed. Please re-authorize this company. QBO response: {resp.text[:200]}"
@@ -452,6 +469,7 @@ async def _refresh_access_token(db, company_id: str, refresh_token: str) -> str:
     new_refresh = tokens.get("refresh_token", refresh_token)
     expires_in = tokens.get("expires_in", 3600)
     expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+    logger.info("Token refresh OK | company=%s | intuit_tid=%s", company_id, intuit_tid)
 
     db.execute(
         """UPDATE companies SET access_token=?, refresh_token=?, token_expires_at=?,
@@ -480,8 +498,14 @@ async def qbo_api_call(db, company_id: str, endpoint: str,
         else:
             resp = await client.post(url, headers=headers, json=params or {})
 
+    intuit_tid = resp.headers.get("intuit_tid", "N/A")
+
     if resp.status_code == 401:
         # Token might be stale despite our check — try one refresh
+        logger.warning(
+            "QBO 401 (retrying) | company=%s | endpoint=%s | intuit_tid=%s",
+            company_id, endpoint, intuit_tid,
+        )
         access_token = await _refresh_access_token(
             db, company_id,
             db.execute("SELECT refresh_token FROM companies WHERE id=?", (company_id,)).fetchone()["refresh_token"]
@@ -492,13 +516,22 @@ async def qbo_api_call(db, company_id: str, endpoint: str,
                 resp = await client.get(url, headers=headers, params=params or {})
             else:
                 resp = await client.post(url, headers=headers, json=params or {})
+        intuit_tid = resp.headers.get("intuit_tid", "N/A")
 
     if resp.status_code != 200:
+        logger.error(
+            "QBO API ERROR | company=%s | %s %s | status=%d | intuit_tid=%s | body=%s",
+            company_id, method, endpoint, resp.status_code, intuit_tid, resp.text[:500],
+        )
         raise HTTPException(
             status_code=resp.status_code,
             detail=f"QBO API error: {resp.text[:300]}"
         )
 
+    logger.info(
+        "QBO API OK | company=%s | %s %s | intuit_tid=%s",
+        company_id, method, endpoint, intuit_tid,
+    )
     return resp.json()
 
 
@@ -532,8 +565,14 @@ async def qbo_get_company_info(db, company_id_db: str, realm_id: str = None) -> 
         }
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=headers)
+        intuit_tid = resp.headers.get("intuit_tid", "N/A")
         if resp.status_code != 200:
+            logger.error(
+                "QBO companyinfo ERROR | company=%s | realm=%s | status=%d | intuit_tid=%s | body=%s",
+                company_id_db, realm_id, resp.status_code, intuit_tid, resp.text[:300],
+            )
             raise HTTPException(status_code=resp.status_code, detail=resp.text[:300])
+        logger.info("QBO companyinfo OK | company=%s | realm=%s | intuit_tid=%s", company_id_db, realm_id, intuit_tid)
         return resp.json()
     else:
         realm = db.execute(
@@ -550,7 +589,12 @@ async def qbo_get_company_info(db, company_id_db: str, realm_id: str = None) -> 
 @asynccontextmanager
 async def lifespan(app):
     init_db()
+    logger.info(
+        "EnterpriseLedger started | env=%s | db=%s | volume=%s",
+        QBO_ENVIRONMENT, DB_PATH, bool(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")),
+    )
     yield
+    logger.info("EnterpriseLedger shutting down")
 
 app = FastAPI(lifespan=lifespan, title="EnterpriseLedger API")
 app.add_middleware(
@@ -936,8 +980,14 @@ async def qbo_callback(request: Request, code: str = None, state: str = None,
             },
         )
 
+    token_tid = token_resp.headers.get("intuit_tid", "N/A")
+
     if token_resp.status_code != 200:
         err_detail = token_resp.text[:300]
+        logger.error(
+            "OAuth token exchange FAILED | realm=%s | status=%d | intuit_tid=%s | body=%s",
+            realmId, token_resp.status_code, token_tid, err_detail,
+        )
         db.close()
         return HTMLResponse(content=f"""<html><body>
             <h2>Token Exchange Failed</h2><p>{err_detail}</p>
@@ -948,6 +998,7 @@ async def qbo_callback(request: Request, code: str = None, state: str = None,
                 }}
             </script></body></html>""")
 
+    logger.info("OAuth token exchange OK | realm=%s | intuit_tid=%s", realmId, token_tid)
     tokens = token_resp.json()
     access_token = tokens["access_token"]
     refresh_token_val = tokens["refresh_token"]
@@ -965,7 +1016,13 @@ async def qbo_callback(request: Request, code: str = None, state: str = None,
             },
         )
 
+    info_tid = info_resp.headers.get("intuit_tid", "N/A")
+
     if info_resp.status_code != 200:
+        logger.error(
+            "OAuth companyinfo fetch FAILED | realm=%s | status=%d | intuit_tid=%s | body=%s",
+            realmId, info_resp.status_code, info_tid, info_resp.text[:300],
+        )
         db.close()
         return HTMLResponse(content=f"""<html><body>
             <h2>Connected but could not fetch company info</h2>
@@ -976,6 +1033,7 @@ async def qbo_callback(request: Request, code: str = None, state: str = None,
                 }}
             </script></body></html>""")
 
+    logger.info("OAuth companyinfo OK | realm=%s | intuit_tid=%s", realmId, info_tid)
     company_data = info_resp.json()
     info = company_data.get("CompanyInfo", company_data)
     company_name = info.get("CompanyName", "Unknown")
