@@ -2122,41 +2122,99 @@ async def delete_ic_template(template_id: str):
 # =====================================================================
 
 @app.get("/api/dashboard/summary")
-async def dashboard_summary():
-    """KPI data for home page. Uses cached data from all companies."""
+async def dashboard_summary(
+    period: str = "last_month",
+    start_date: str = None,
+    end_date: str = None,
+):
+    """KPI data for home page. Pulls live data from connected companies.
+    
+    period: last_month (default), ytd_last_month, custom
+    start_date/end_date: required when period=custom (YYYY-MM-DD)
+    """
     db = get_db()
     company_count = db.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
-
-    # Gather cached reports for KPIs
-    year = datetime.now().year
-    live_data = {"company_count": company_count}
-
-    for key, rtype, period in [
-        ("current_month_pl", "profit_loss", f"{year}-mtd"),
-        ("last_month_pl", "profit_loss", f"{year}-last-month"),
-        ("balance_sheet", "balance_sheet", f"{year}-ytd"),
-        ("cash_flow", "cash_flow", f"{year}-mtd"),
-    ]:
-        rows = db.execute(
-            "SELECT data_json FROM company_reports WHERE report_type=? AND period_key=?",
-            (rtype, period)
-        ).fetchall()
-        if rows:
-            reports = [json.loads(r["data_json"]) for r in rows]
-            live_data[key] = _merge_reports(reports) if len(reports) > 1 else reports[0]
-        else:
-            # Try ytd fallback
-            rows = db.execute(
-                "SELECT data_json FROM company_reports WHERE report_type=? AND period_key=?",
-                (rtype, f"{year}-ytd")
-            ).fetchall()
-            if rows:
-                reports = [json.loads(r["data_json"]) for r in rows]
-                live_data[key] = _merge_reports(reports) if len(reports) > 1 else reports[0]
-            else:
-                live_data[key] = None
-
+    connected = db.execute(
+        "SELECT id, name FROM companies WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != ''"
+    ).fetchall()
     db.close()
+
+    now = datetime.now()
+    y, m = now.year, now.month
+
+    # Resolve date ranges based on period selection
+    if period == "ytd_last_month":
+        # Jan 1 through end of last month
+        lm = m - 1 or 12
+        ly = y if m > 1 else y - 1
+        last_day = calendar.monthrange(ly, lm)[1]
+        main_start = f"{ly if lm == 12 and m == 1 else y}-01-01"
+        main_end = f"{ly}-{lm:02d}-{last_day:02d}"
+        # Prior = same range, year before
+        prior_start = f"{int(main_start[:4])-1}{main_start[4:]}"
+        prior_end = f"{ly-1}-{lm:02d}-{last_day:02d}"
+        period_label = f"YTD through {calendar.month_abbr[lm]} {ly}"
+    elif period == "custom" and start_date and end_date:
+        main_start = start_date
+        main_end = end_date
+        s = datetime.strptime(start_date, "%Y-%m-%d")
+        e = datetime.strptime(end_date, "%Y-%m-%d")
+        prior_start = s.replace(year=s.year - 1).strftime("%Y-%m-%d")
+        prior_end = e.replace(year=e.year - 1).strftime("%Y-%m-%d")
+        period_label = f"{start_date} to {end_date}"
+    else:
+        # Default: last month
+        lm = m - 1 or 12
+        ly = y if m > 1 else y - 1
+        last_day = calendar.monthrange(ly, lm)[1]
+        main_start = f"{ly}-{lm:02d}-01"
+        main_end = f"{ly}-{lm:02d}-{last_day:02d}"
+        prior_start = f"{ly-1}-{lm:02d}-01"
+        prior_end = f"{ly-1}-{lm:02d}-{last_day:02d}"
+        period_label = f"{calendar.month_name[lm]} {ly}"
+
+    live_data = {
+        "company_count": company_count,
+        "period_label": period_label,
+        "period": period,
+        "start_date": main_start,
+        "end_date": main_end,
+    }
+
+    # Pull live P&L for main period + prior period
+    main_reports = []
+    prior_reports = []
+    bs_reports = []
+    for company in connected:
+        try:
+            rp = await qbo_get_report(get_db(), company["id"], "ProfitAndLoss", {
+                "start_date": main_start, "end_date": main_end, "accounting_method": "Accrual",
+            })
+            if _has_report_data(rp):
+                main_reports.append(rp)
+        except Exception:
+            pass
+        try:
+            rp2 = await qbo_get_report(get_db(), company["id"], "ProfitAndLoss", {
+                "start_date": prior_start, "end_date": prior_end, "accounting_method": "Accrual",
+            })
+            if _has_report_data(rp2):
+                prior_reports.append(rp2)
+        except Exception:
+            pass
+        try:
+            bs = await qbo_get_report(get_db(), company["id"], "BalanceSheet", {
+                "start_date": main_start, "end_date": main_end,
+            })
+            if _has_report_data(bs):
+                bs_reports.append(bs)
+        except Exception:
+            pass
+
+    live_data["current_pl"] = _merge_reports(main_reports) if main_reports else None
+    live_data["prior_pl"] = _merge_reports(prior_reports) if prior_reports else None
+    live_data["balance_sheet"] = _merge_reports(bs_reports) if bs_reports else None
+
     return live_data
 
 
