@@ -164,6 +164,10 @@ def init_db():
             source_credit_account TEXT,
             dest_debit_account TEXT,
             dest_credit_account TEXT,
+            source_debit_entity_id TEXT,
+            source_credit_entity_id TEXT,
+            dest_debit_entity_id TEXT,
+            dest_credit_entity_id TEXT,
             source_je_id TEXT,
             dest_je_id TEXT,
             status TEXT DEFAULT 'pending',
@@ -200,6 +204,11 @@ def init_db():
         ("token_expires_at", "TEXT"),
     ]:
         _add_column_safe(db, "companies", col, ctype)
+
+    # Entity ID columns for IC entries (AR/AP need Customer/Vendor refs)
+    for col in ["source_debit_entity_id", "source_credit_entity_id",
+                "dest_debit_entity_id", "dest_credit_entity_id"]:
+        _add_column_safe(db, "intercompany_entries", col, "TEXT")
 
     # Default admin user
     existing = db.execute("SELECT id FROM users LIMIT 1").fetchone()
@@ -1001,6 +1010,34 @@ async def get_company_accounts(company_id: str):
     return [dict(r) for r in rows]
 
 
+@app.get("/api/companies/{company_id}/customers")
+async def get_company_customers(company_id: str):
+    """Fetch active customers from QBO for a specific company."""
+    db = get_db()
+    try:
+        result = await qbo_query(db, company_id, "SELECT Id, DisplayName, CompanyName FROM Customer WHERE Active = true MAXRESULTS 500")
+        customers = result.get("QueryResponse", {}).get("Customer", [])
+        return [{"id": c["Id"], "name": c.get("DisplayName", c.get("CompanyName", "")), "type": "Customer"} for c in customers]
+    except Exception as ex:
+        raise HTTPException(status_code=400, detail=f"Error fetching customers: {str(ex)}")
+    finally:
+        db.close()
+
+
+@app.get("/api/companies/{company_id}/vendors")
+async def get_company_vendors(company_id: str):
+    """Fetch active vendors from QBO for a specific company."""
+    db = get_db()
+    try:
+        result = await qbo_query(db, company_id, "SELECT Id, DisplayName, CompanyName FROM Vendor WHERE Active = true MAXRESULTS 500")
+        vendors = result.get("QueryResponse", {}).get("Vendor", [])
+        return [{"id": v["Id"], "name": v.get("DisplayName", v.get("CompanyName", "")), "type": "Vendor"} for v in vendors]
+    except Exception as ex:
+        raise HTTPException(status_code=400, detail=f"Error fetching vendors: {str(ex)}")
+    finally:
+        db.close()
+
+
 @app.get("/api/companies/{company_id}/reports")
 async def get_company_report_list(company_id: str):
     db = get_db()
@@ -1420,6 +1457,10 @@ class ICEntryRequest(BaseModel):
     source_credit_account: str
     dest_debit_account: str
     dest_credit_account: str
+    source_debit_entity_id: Optional[str] = None
+    source_credit_entity_id: Optional[str] = None
+    dest_debit_entity_id: Optional[str] = None
+    dest_credit_entity_id: Optional[str] = None
 
 @app.get("/api/intercompany")
 async def list_ic_entries():
@@ -1442,11 +1483,15 @@ async def create_ic_entry(req: ICEntryRequest):
     db.execute(
         """INSERT INTO intercompany_entries
            (id, source_company_id, dest_company_id, entry_type, amount, description, date,
-            source_debit_account, source_credit_account, dest_debit_account, dest_credit_account, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+            source_debit_account, source_credit_account, dest_debit_account, dest_credit_account,
+            source_debit_entity_id, source_credit_entity_id, dest_debit_entity_id, dest_credit_entity_id,
+            status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
         (entry_id, req.source_company_id, req.dest_company_id, req.entry_type, req.amount,
          req.description, req.date, req.source_debit_account, req.source_credit_account,
-         req.dest_debit_account, req.dest_credit_account),
+         req.dest_debit_account, req.dest_credit_account,
+         req.source_debit_entity_id, req.source_credit_entity_id,
+         req.dest_debit_entity_id, req.dest_credit_entity_id),
     )
     db.commit()
     db.close()
@@ -1465,41 +1510,48 @@ async def post_ic_entry(entry_id: str):
     source_je_id = None
     dest_je_id = None
 
-    # --- Helper: look up QBO account ID from cached account name ---
-    def find_account_id(company_id, account_name):
+    # --- Helper: look up QBO account ID + type from cached account name ---
+    def find_account_info(company_id, account_name):
         if not account_name:
-            return None
+            return None, None
         row = db.execute(
-            """SELECT qbo_account_id FROM company_accounts
+            """SELECT qbo_account_id, account_type FROM company_accounts
                WHERE company_id = ? AND (fully_qualified_name = ? OR name = ?) AND active = 1
                LIMIT 1""",
             (company_id, account_name, account_name)
         ).fetchone()
-        return row["qbo_account_id"] if row else None
+        if row:
+            return row["qbo_account_id"], row["account_type"]
+        return None, None
+
+    # --- Helper: build a single JE line ---
+    def build_je_line(posting_type, amount, account_ref, account_type, entity_id, entity_type, description):
+        detail = {
+            "PostingType": posting_type,
+            "AccountRef": {"value": account_ref}
+        }
+        # QBO requires EntityRef for AR (Customer) and AP (Vendor) accounts
+        if account_type == "Accounts Receivable" and entity_id:
+            detail["Entity"] = {"EntityRef": {"value": entity_id}, "Type": "Customer"}
+        elif account_type == "Accounts Payable" and entity_id:
+            detail["Entity"] = {"EntityRef": {"value": entity_id}, "Type": "Vendor"}
+        return {
+            "DetailType": "JournalEntryLineDetail",
+            "Amount": round(abs(amount), 2),
+            "Description": description or "",
+            "JournalEntryLineDetail": detail
+        }
 
     # --- Helper: build QBO JournalEntry payload ---
-    def build_je_payload(txn_date, amount, debit_account_ref, credit_account_ref, description):
+    def build_je_payload(txn_date, amount, debit_ref, debit_type, credit_ref, credit_type,
+                         debit_entity_id, credit_entity_id, description):
         line = []
-        if debit_account_ref:
-            line.append({
-                "DetailType": "JournalEntryLineDetail",
-                "Amount": round(abs(amount), 2),
-                "Description": description or "",
-                "JournalEntryLineDetail": {
-                    "PostingType": "Debit",
-                    "AccountRef": {"value": debit_account_ref}
-                }
-            })
-        if credit_account_ref:
-            line.append({
-                "DetailType": "JournalEntryLineDetail",
-                "Amount": round(abs(amount), 2),
-                "Description": description or "",
-                "JournalEntryLineDetail": {
-                    "PostingType": "Credit",
-                    "AccountRef": {"value": credit_account_ref}
-                }
-            })
+        if debit_ref:
+            line.append(build_je_line("Debit", amount, debit_ref, debit_type,
+                                       debit_entity_id, None, description))
+        if credit_ref:
+            line.append(build_je_line("Credit", amount, credit_ref, credit_type,
+                                       credit_entity_id, None, description))
         return {
             "TxnDate": txn_date,
             "Line": line,
@@ -1508,13 +1560,16 @@ async def post_ic_entry(entry_id: str):
 
     try:
         # --- Post to Source Company ---
-        src_debit_id = find_account_id(entry["source_company_id"], entry["source_debit_account"])
-        src_credit_id = find_account_id(entry["source_company_id"], entry["source_credit_account"])
+        src_debit_id, src_debit_type = find_account_info(entry["source_company_id"], entry["source_debit_account"])
+        src_credit_id, src_credit_type = find_account_info(entry["source_company_id"], entry["source_credit_account"])
 
         if src_debit_id and src_credit_id:
             payload = build_je_payload(
                 entry["date"], entry["amount"],
-                src_debit_id, src_credit_id,
+                src_debit_id, src_debit_type,
+                src_credit_id, src_credit_type,
+                entry.get("source_debit_entity_id"),
+                entry.get("source_credit_entity_id"),
                 entry["description"]
             )
             result = await qbo_api_call(
@@ -1532,13 +1587,16 @@ async def post_ic_entry(entry_id: str):
             errors.append(f"Could not find QBO account ID for: {', '.join(missing)}")
 
         # --- Post to Destination Company ---
-        dest_debit_id = find_account_id(entry["dest_company_id"], entry["dest_debit_account"])
-        dest_credit_id = find_account_id(entry["dest_company_id"], entry["dest_credit_account"])
+        dest_debit_id, dest_debit_type = find_account_info(entry["dest_company_id"], entry["dest_debit_account"])
+        dest_credit_id, dest_credit_type = find_account_info(entry["dest_company_id"], entry["dest_credit_account"])
 
         if dest_debit_id and dest_credit_id:
             payload = build_je_payload(
                 entry["date"], entry["amount"],
-                dest_debit_id, dest_credit_id,
+                dest_debit_id, dest_debit_type,
+                dest_credit_id, dest_credit_type,
+                entry.get("dest_debit_entity_id"),
+                entry.get("dest_credit_entity_id"),
                 entry["description"]
             )
             result = await qbo_api_call(
