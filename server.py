@@ -1709,6 +1709,15 @@ async def create_ic_template(req: ICTemplateRequest):
     return {"id": tid}
 
 
+@app.delete("/api/intercompany/templates/{template_id}")
+async def delete_ic_template(template_id: str):
+    db = get_db()
+    db.execute("DELETE FROM ic_templates WHERE id = ?", (template_id,))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
 # =====================================================================
 #  DASHBOARD SUMMARY
 # =====================================================================
