@@ -48,12 +48,8 @@ from typing import List, Optional
 
 # ---------- QBO Config ----------
 
-QBO_CLIENT_ID = os.environ.get(
-    "QBO_CLIENT_ID", "ABNtRaTG8srlHkmlrGKJd9lbhsGSB0es8t9mu2SY30v5Mekk0w"
-)
-QBO_CLIENT_SECRET = os.environ.get(
-    "QBO_CLIENT_SECRET", "1q5IQ9fIJ4CE2kG6dF37oeN7HX0LQ4PoAnUbITte"
-)
+QBO_CLIENT_ID = os.environ.get("QBO_CLIENT_ID", "")
+QBO_CLIENT_SECRET = os.environ.get("QBO_CLIENT_SECRET", "")
 QBO_ENVIRONMENT = os.environ.get("QBO_ENVIRONMENT", "sandbox")  # "sandbox" or "production"
 
 # Intuit OAuth endpoints
