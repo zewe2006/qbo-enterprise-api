@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Enterprise QBO Consolidated Dashboard — Backend API Server.
+"""EnterpriseLedger — Backend API Server.
+Consolidated Reporting for QuickBooks.
 
 Architecture:
 - Direct QuickBooks Online API integration via OAuth 2.0.
@@ -243,7 +244,7 @@ def init_db():
         pw_hash = hashlib.sha256("admin123".encode()).hexdigest()
         db.execute(
             "INSERT INTO users (id, email, password_hash, name, role) VALUES (?, ?, ?, ?, ?)",
-            (admin_id, "admin@enterprise.local", pw_hash, "Admin", "admin"),
+            (admin_id, "admin@enterpriseledger.local", pw_hash, "Admin", "admin"),
         )
         db.commit()
 
@@ -550,7 +551,7 @@ async def lifespan(app):
     init_db()
     yield
 
-app = FastAPI(lifespan=lifespan, title="QBO Enterprise Dashboard API")
+app = FastAPI(lifespan=lifespan, title="EnterpriseLedger API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
