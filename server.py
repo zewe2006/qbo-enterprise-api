@@ -1459,10 +1459,127 @@ async def post_ic_entry(entry_id: str):
     if not entry:
         db.close()
         raise HTTPException(status_code=404, detail="Entry not found")
-    db.execute("UPDATE intercompany_entries SET status = 'posted' WHERE id = ?", (entry_id,))
+    entry = dict(entry)
+
+    errors = []
+    source_je_id = None
+    dest_je_id = None
+
+    # --- Helper: look up QBO account ID from cached account name ---
+    def find_account_id(company_id, account_name):
+        if not account_name:
+            return None
+        row = db.execute(
+            """SELECT qbo_account_id FROM company_accounts
+               WHERE company_id = ? AND (fully_qualified_name = ? OR name = ?) AND active = 1
+               LIMIT 1""",
+            (company_id, account_name, account_name)
+        ).fetchone()
+        return row["qbo_account_id"] if row else None
+
+    # --- Helper: build QBO JournalEntry payload ---
+    def build_je_payload(txn_date, amount, debit_account_ref, credit_account_ref, description):
+        line = []
+        if debit_account_ref:
+            line.append({
+                "DetailType": "JournalEntryLineDetail",
+                "Amount": round(abs(amount), 2),
+                "Description": description or "",
+                "JournalEntryLineDetail": {
+                    "PostingType": "Debit",
+                    "AccountRef": {"value": debit_account_ref}
+                }
+            })
+        if credit_account_ref:
+            line.append({
+                "DetailType": "JournalEntryLineDetail",
+                "Amount": round(abs(amount), 2),
+                "Description": description or "",
+                "JournalEntryLineDetail": {
+                    "PostingType": "Credit",
+                    "AccountRef": {"value": credit_account_ref}
+                }
+            })
+        return {
+            "TxnDate": txn_date,
+            "Line": line,
+            "PrivateNote": f"Intercompany: {description or entry['entry_type']}"
+        }
+
+    try:
+        # --- Post to Source Company ---
+        src_debit_id = find_account_id(entry["source_company_id"], entry["source_debit_account"])
+        src_credit_id = find_account_id(entry["source_company_id"], entry["source_credit_account"])
+
+        if src_debit_id and src_credit_id:
+            payload = build_je_payload(
+                entry["date"], entry["amount"],
+                src_debit_id, src_credit_id,
+                entry["description"]
+            )
+            result = await qbo_api_call(
+                db, entry["source_company_id"],
+                "journalentry?minorversion=65",
+                method="POST", params=payload
+            )
+            source_je_id = result.get("JournalEntry", {}).get("Id")
+        else:
+            missing = []
+            if not src_debit_id:
+                missing.append(f"source debit '{entry['source_debit_account']}'")
+            if not src_credit_id:
+                missing.append(f"source credit '{entry['source_credit_account']}'")
+            errors.append(f"Could not find QBO account ID for: {', '.join(missing)}")
+
+        # --- Post to Destination Company ---
+        dest_debit_id = find_account_id(entry["dest_company_id"], entry["dest_debit_account"])
+        dest_credit_id = find_account_id(entry["dest_company_id"], entry["dest_credit_account"])
+
+        if dest_debit_id and dest_credit_id:
+            payload = build_je_payload(
+                entry["date"], entry["amount"],
+                dest_debit_id, dest_credit_id,
+                entry["description"]
+            )
+            result = await qbo_api_call(
+                db, entry["dest_company_id"],
+                "journalentry?minorversion=65",
+                method="POST", params=payload
+            )
+            dest_je_id = result.get("JournalEntry", {}).get("Id")
+        else:
+            missing = []
+            if not dest_debit_id:
+                missing.append(f"dest debit '{entry['dest_debit_account']}'")
+            if not dest_credit_id:
+                missing.append(f"dest credit '{entry['dest_credit_account']}'")
+            errors.append(f"Could not find QBO account ID for: {', '.join(missing)}")
+
+    except HTTPException as he:
+        errors.append(f"QBO API error: {he.detail}")
+    except Exception as ex:
+        errors.append(f"Error: {str(ex)}")
+
+    # Update status based on results
+    if errors and not source_je_id and not dest_je_id:
+        db.close()
+        raise HTTPException(status_code=400, detail="Failed to post: " + "; ".join(errors))
+
+    new_status = "posted" if not errors else "partial"
+    db.execute(
+        "UPDATE intercompany_entries SET status = ?, source_je_id = ?, dest_je_id = ? WHERE id = ?",
+        (new_status, source_je_id, dest_je_id, entry_id)
+    )
     db.commit()
     db.close()
-    return {"id": entry_id, "status": "posted"}
+
+    return {
+        "id": entry_id,
+        "status": new_status,
+        "source_je_id": source_je_id,
+        "dest_je_id": dest_je_id,
+        "errors": errors if errors else None
+    }
 
 
 @app.delete("/api/intercompany/{entry_id}")
