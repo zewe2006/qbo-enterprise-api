@@ -1021,9 +1021,14 @@ async def get_company_customers(company_id: str):
     """Fetch active customers from QBO for a specific company."""
     db = get_db()
     try:
-        result = await qbo_query(db, company_id, "SELECT Id, DisplayName, CompanyName FROM Customer WHERE Active = true MAXRESULTS 500")
+        result = await qbo_api_call(
+            db, company_id, "query", method="GET",
+            params={"query": "SELECT * FROM Customer WHERE Active = true", "minorversion": "65"}
+        )
         customers = result.get("QueryResponse", {}).get("Customer", [])
         return [{"id": c["Id"], "name": c.get("DisplayName", c.get("CompanyName", "")), "type": "Customer"} for c in customers]
+    except HTTPException:
+        raise
     except Exception as ex:
         raise HTTPException(status_code=400, detail=f"Error fetching customers: {str(ex)}")
     finally:
@@ -1035,9 +1040,14 @@ async def get_company_vendors(company_id: str):
     """Fetch active vendors from QBO for a specific company."""
     db = get_db()
     try:
-        result = await qbo_query(db, company_id, "SELECT Id, DisplayName, CompanyName FROM Vendor WHERE Active = true MAXRESULTS 500")
+        result = await qbo_api_call(
+            db, company_id, "query", method="GET",
+            params={"query": "SELECT * FROM Vendor WHERE Active = true", "minorversion": "65"}
+        )
         vendors = result.get("QueryResponse", {}).get("Vendor", [])
         return [{"id": v["Id"], "name": v.get("DisplayName", v.get("CompanyName", "")), "type": "Vendor"} for v in vendors]
+    except HTTPException:
+        raise
     except Exception as ex:
         raise HTTPException(status_code=400, detail=f"Error fetching vendors: {str(ex)}")
     finally:
