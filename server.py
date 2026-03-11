@@ -1492,9 +1492,21 @@ async def get_transaction_detail(params: TransactionDetailParams):
     all_transactions = []
     for company in companies:
         try:
+            # Step 1: Look up account ID by name
+            safe_name = params.account_name.replace("'", "\\'")
+            acct_data = await qbo_query(db, company["id"],
+                f"SELECT Id, Name FROM Account WHERE Name = '{safe_name}' AND Active = true MAXRESULTS 5")
+            acct_list = acct_data.get("QueryResponse", {}).get("Account", [])
+            if not acct_list:
+                logger.info("Account '%s' not found in %s", params.account_name, company["name"])
+                continue
+
+            # Use first matching account's ID
+            account_id = acct_list[0]["Id"]
+
             qbo_params = {
-                "account": params.account_name,
-                "columns": "tx_date,txn_type,doc_num,name,memo,account_name,subt_nat_amount,rbal_nat_amount,debt_amt,credit_amt,nat_open_bal,nat_foreign_open_bal",
+                "account": account_id,
+                "columns": "tx_date,txn_type,doc_num,name,memo,account_name,subt_nat_amount,rbal_nat_amount,debt_amt,credit_amt",
                 "sort_by": "tx_date",
                 "sort_order": "ascend",
             }
@@ -1508,7 +1520,7 @@ async def get_transaction_detail(params: TransactionDetailParams):
                 qbo_params["end_date"] = params.end_date
 
             report = await qbo_get_report(db, company["id"], "GeneralLedger", qbo_params)
-            transactions = _parse_gl_transactions(report, company["name"])
+            transactions = _parse_gl_transactions(report, company["name"], params.account_name)
             all_transactions.extend(transactions)
         except Exception as e:
             logger.warning("GL drill-down failed for %s: %s", company["name"], str(e)[:200])
@@ -1525,8 +1537,14 @@ async def get_transaction_detail(params: TransactionDetailParams):
     }
 
 
-def _parse_gl_transactions(report: dict, company_name: str) -> list:
-    """Parse a QBO GeneralLedger report into flat transaction rows."""
+def _parse_gl_transactions(report: dict, company_name: str, filter_account: str = None) -> list:
+    """Parse a QBO GeneralLedger report into flat transaction rows.
+    The GL report is structured as sections by account. Each section has:
+      - Header with account name
+      - Data rows with individual transactions
+      - Summary with totals
+    If filter_account is provided, only rows from matching account sections are returned.
+    """
     transactions = []
     if not report:
         return transactions
@@ -1537,27 +1555,54 @@ def _parse_gl_transactions(report: dict, company_name: str) -> list:
         col_type = col.get("ColTitle", "").strip()
         columns.append(col_type)
 
-    def walk_rows(rows_obj):
+    filter_lower = filter_account.lower().strip() if filter_account else None
+
+    def _extract_section_name(row):
+        """Extract account name from a section header."""
+        header = row.get("Header", {})
+        cols = header.get("ColData", [])
+        if cols:
+            return cols[0].get("value", "").strip()
+        return ""
+
+    def _section_matches(section_name):
+        if not filter_lower:
+            return True
+        return section_name.lower().strip() == filter_lower
+
+    def walk_rows(rows_obj, in_matching_section=False):
         for row in rows_obj.get("Row", []):
-            # Data rows have ColData directly
-            if row.get("ColData"):
-                txn = {"company": company_name}
-                for i, cd in enumerate(row["ColData"]):
-                    val = cd.get("value", "")
-                    col_title = columns[i] if i < len(columns) else f"col_{i}"
-                    txn[col_title] = val
-                transactions.append(txn)
-            # Sections have nested Rows
-            if row.get("Rows"):
-                walk_rows(row["Rows"])
-            # Header rows in sections
-            if row.get("Header", {}).get("ColData"):
-                # Skip header rows (account name groupings)
-                pass
-            # Summary rows
-            if row.get("Summary", {}).get("ColData"):
-                # Skip summary rows (they're totals)
-                pass
+            row_type = row.get("type", "")
+
+            # Section rows contain Header + Rows + Summary
+            if row_type == "Section":
+                section_name = _extract_section_name(row)
+                matches = _section_matches(section_name)
+                # Recurse into this section's rows
+                nested_rows = row.get("Rows", {})
+                if nested_rows:
+                    walk_rows(nested_rows, in_matching_section=matches)
+            elif row.get("Header"):
+                # Some sections don't have type=Section but do have Header
+                section_name = _extract_section_name(row)
+                matches = _section_matches(section_name)
+                if row.get("Rows"):
+                    walk_rows(row["Rows"], in_matching_section=matches)
+            else:
+                # Data row
+                if in_matching_section and row.get("ColData"):
+                    txn = {"company": company_name}
+                    for i, cd in enumerate(row["ColData"]):
+                        val = cd.get("value", "")
+                        col_title = columns[i] if i < len(columns) else f"col_{i}"
+                        txn[col_title] = val
+                    # Skip if it looks like a total/summary row (no date)
+                    date_val = txn.get("Date", "") or txn.get("date", "")
+                    if date_val:
+                        transactions.append(txn)
+                # Also recurse if nested
+                if row.get("Rows"):
+                    walk_rows(row["Rows"], in_matching_section=in_matching_section)
 
     rows = report.get("Rows", {})
     walk_rows(rows)
