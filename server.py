@@ -1269,12 +1269,15 @@ class ReportParams(BaseModel):
 @app.post("/api/reports/profit-loss")
 async def get_profit_loss(params: ReportParams):
     if params.company_id == "all":
-        wants_comparison = params.compare_prior_year or params.compare_prior_month
-        if not wants_comparison:
-            result = _get_cached_report(params, "profit_loss")
+        # Always try live first for consolidated to avoid stale/empty cache
+        try:
+            result = await _get_live_consolidated(params, "ProfitAndLoss", "profit_loss")
             if result.get("current") is not None:
                 return result
-        return await _get_live_consolidated(params, "ProfitAndLoss", "profit_loss")
+        except Exception:
+            pass
+        # Fall back to cache
+        return _get_cached_report(params, "profit_loss")
     if params.company_id:
         return await _get_live_report_for_company(params, "ProfitAndLoss", "profit_loss")
     return {"current": None, "message": "Select a company"}
@@ -1315,12 +1318,12 @@ async def _get_live_consolidated(params, qbo_report_name, report_type):
                 qbo_report_name,
                 report_type,
             )
-            if result.get("current"):
+            if result.get("current") and _has_report_data(result["current"]):
                 reports.append(result["current"])
                 company_names.append({"name": company["name"], "company_id": company["id"]})
-            if result.get("prior_year"):
+            if result.get("prior_year") and _has_report_data(result["prior_year"]):
                 prior_year_reports.append(result["prior_year"])
-            if result.get("prior_month"):
+            if result.get("prior_month") and _has_report_data(result["prior_month"]):
                 prior_month_reports.append(result["prior_month"])
         except Exception:
             pass
@@ -1340,12 +1343,13 @@ async def _get_live_consolidated(params, qbo_report_name, report_type):
 @app.post("/api/reports/balance-sheet")
 async def get_balance_sheet(params: ReportParams):
     if params.company_id == "all":
-        wants_comparison = params.compare_prior_year or params.compare_prior_month
-        if not wants_comparison:
-            result = _get_cached_report(params, "balance_sheet")
+        try:
+            result = await _get_live_consolidated(params, "BalanceSheet", "balance_sheet")
             if result.get("current") is not None:
                 return result
-        return await _get_live_consolidated(params, "BalanceSheet", "balance_sheet")
+        except Exception:
+            pass
+        return _get_cached_report(params, "balance_sheet")
     if params.company_id:
         return await _get_live_report_for_company(params, "BalanceSheet", "balance_sheet")
     return {"current": None, "message": "Select a company"}
@@ -1354,12 +1358,13 @@ async def get_balance_sheet(params: ReportParams):
 @app.post("/api/reports/cash-flow")
 async def get_cash_flow(params: ReportParams):
     if params.company_id == "all":
-        wants_comparison = params.compare_prior_year or params.compare_prior_month
-        if not wants_comparison:
-            result = _get_cached_report(params, "cash_flow")
+        try:
+            result = await _get_live_consolidated(params, "CashFlow", "cash_flow")
             if result.get("current") is not None:
                 return result
-        return await _get_live_consolidated(params, "CashFlow", "cash_flow")
+        except Exception:
+            pass
+        return _get_cached_report(params, "cash_flow")
     if params.company_id:
         return await _get_live_report_for_company(params, "CashFlow", "cash_flow")
     return {"current": None, "message": "Select a company"}
@@ -1561,7 +1566,24 @@ def _get_cached_report(params, report_type):
         return {"current": json.loads(row["data_json"]), "cached_at": row["cached_at"]}
 
 
+def _has_report_data(report):
+    """Check if a QBO report actually contains numeric data (not an empty skeleton)."""
+    if not report:
+        return False
+    header = report.get("Header", {})
+    for opt in header.get("Option", []):
+        if opt.get("Name") == "NoReportData" and str(opt.get("Value", "")).lower() == "true":
+            return False
+    # Also check if Columns has a Money/Amount column
+    cols = report.get("Columns", {}).get("Column", [])
+    if len(cols) < 2:
+        return False
+    return True
+
+
 def _merge_reports(reports):
+    # Filter out empty/skeleton reports that have no actual data
+    reports = [r for r in reports if _has_report_data(r)]
     if not reports:
         return None
     if len(reports) == 1:
