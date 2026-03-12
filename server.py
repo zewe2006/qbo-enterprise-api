@@ -295,6 +295,19 @@ def init_db():
             db.execute("UPDATE ic_templates SET org_id = ? WHERE org_id IS NULL", (default_org_id,))
             db.commit()
 
+    # Ensure orgs with >3 companies are on business plan (grandfathered)
+    for org_row in db.execute(
+        "SELECT o.id, o.plan, COUNT(c.id) as cnt FROM organizations o "
+        "LEFT JOIN companies c ON c.org_id = o.id "
+        "GROUP BY o.id HAVING cnt > 3 AND o.plan = 'free'"
+    ).fetchall():
+        db.execute(
+            "UPDATE organizations SET plan = 'business', max_companies = 50, subscription_status = 'active' WHERE id = ?",
+            (org_row["id"],),
+        )
+        logger.info("Grandfathered org %s to business plan (%d companies)", org_row["id"], org_row["cnt"])
+    db.commit()
+
     # Default admin user
     existing = db.execute("SELECT id FROM users LIMIT 1").fetchone()
     if not existing:
