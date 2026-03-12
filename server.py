@@ -46,6 +46,12 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List, Optional
 
+# ---------- Stripe Config ----------
+
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_PRICE_BUSINESS_MONTHLY = os.environ.get("STRIPE_PRICE_BUSINESS_MONTHLY", "")  # price_xxx from Stripe dashboard
+
 # ---------- QBO Config ----------
 
 QBO_CLIENT_ID = os.environ.get("QBO_CLIENT_ID", "")
@@ -265,6 +271,12 @@ def init_db():
     _add_column_safe(db, "intercompany_entries", "org_id", "TEXT")
     _add_column_safe(db, "ic_templates", "org_id", "TEXT")
     _add_column_safe(db, "oauth_states", "org_id", "TEXT")
+
+    # Stripe billing migration
+    _add_column_safe(db, "organizations", "stripe_customer_id", "TEXT")
+    _add_column_safe(db, "organizations", "stripe_subscription_id", "TEXT")
+    _add_column_safe(db, "organizations", "subscription_status", "TEXT DEFAULT 'none'")  # none, active, past_due, canceled
+    _add_column_safe(db, "organizations", "trial_ends_at", "TEXT")
 
     # Create default org for existing data if not exists
     existing_org = db.execute("SELECT id FROM organizations LIMIT 1").fetchone()
@@ -2745,6 +2757,215 @@ async def dashboard_summary(
     live_data["balance_sheet"] = _merge_reports(bs_reports) if bs_reports else None
 
     return live_data
+
+
+# =====================================================================
+#  STRIPE BILLING
+# =====================================================================
+
+@app.get("/api/billing/plans")
+async def get_plans():
+    """Return available plans (public, no auth needed)."""
+    return {
+        "plans": [
+            {
+                "id": "free",
+                "name": "Starter",
+                "price": 0,
+                "interval": None,
+                "max_companies": 3,
+                "features": ["Up to 3 companies", "P&L, Balance Sheet, Cash Flow", "Transaction drill-down", "1 admin user"],
+            },
+            {
+                "id": "business",
+                "name": "Business",
+                "price": 4900,  # cents
+                "interval": "month",
+                "max_companies": 50,
+                "features": ["Up to 50 companies", "All financial reports", "Period comparison", "Intercompany journals", "Account mapping", "Unlimited team members"],
+            },
+        ]
+    }
+
+
+@app.get("/api/billing/subscription")
+async def get_subscription(authorization: str = Header(None)):
+    """Get current org's subscription status."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+    db = get_db()
+    org = db.execute("SELECT * FROM organizations WHERE id = ?", (org_id,)).fetchone()
+    db.close()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    org_dict = dict(org)
+    return {
+        "plan": org_dict.get("plan", "free"),
+        "max_companies": org_dict.get("max_companies", 3),
+        "subscription_status": org_dict.get("subscription_status", "none"),
+        "stripe_customer_id": org_dict.get("stripe_customer_id", ""),
+        "trial_ends_at": org_dict.get("trial_ends_at", ""),
+    }
+
+
+@app.post("/api/billing/create-checkout")
+async def create_checkout_session(authorization: str = Header(None)):
+    """Create a Stripe Checkout session for upgrading to Business plan."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Stripe is not configured.")
+    import stripe
+    stripe.api_key = STRIPE_SECRET_KEY
+
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+
+    db = get_db()
+    org = db.execute("SELECT * FROM organizations WHERE id = ?", (org_id,)).fetchone()
+    org_dict = dict(org)
+
+    # Get or create Stripe customer
+    stripe_customer_id = org_dict.get("stripe_customer_id")
+    if not stripe_customer_id:
+        customer = stripe.Customer.create(
+            email=user["email"],
+            name=org_dict.get("name", ""),
+            metadata={"org_id": org_id},
+        )
+        stripe_customer_id = customer.id
+        db.execute("UPDATE organizations SET stripe_customer_id = ? WHERE id = ?", (stripe_customer_id, org_id))
+        db.commit()
+    db.close()
+
+    # Create Checkout session
+    session = stripe.checkout.Session.create(
+        customer=stripe_customer_id,
+        payment_method_types=["card"],
+        line_items=[{
+            "price": STRIPE_PRICE_BUSINESS_MONTHLY,
+            "quantity": 1,
+        }],
+        mode="subscription",
+        success_url=FRONTEND_ORIGIN + "?billing=success",
+        cancel_url=FRONTEND_ORIGIN + "?billing=canceled",
+        subscription_data={
+            "trial_period_days": 14,
+            "metadata": {"org_id": org_id},
+        },
+        metadata={"org_id": org_id},
+    )
+    return {"checkout_url": session.url}
+
+
+@app.post("/api/billing/portal")
+async def create_billing_portal(authorization: str = Header(None)):
+    """Create a Stripe Billing Portal session for managing subscription."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Stripe is not configured.")
+    import stripe
+    stripe.api_key = STRIPE_SECRET_KEY
+
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+
+    db = get_db()
+    org = db.execute("SELECT stripe_customer_id FROM organizations WHERE id = ?", (org_id,)).fetchone()
+    db.close()
+
+    if not org or not org["stripe_customer_id"]:
+        raise HTTPException(status_code=400, detail="No billing account found. Please upgrade first.")
+
+    session = stripe.billing_portal.Session.create(
+        customer=org["stripe_customer_id"],
+        return_url=FRONTEND_ORIGIN,
+    )
+    return {"portal_url": session.url}
+
+
+@app.post("/api/billing/webhook")
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhook events to update subscription status."""
+    if not STRIPE_SECRET_KEY:
+        return {"status": "stripe not configured"}
+    import stripe
+    stripe.api_key = STRIPE_SECRET_KEY
+
+    body = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+
+    try:
+        if STRIPE_WEBHOOK_SECRET:
+            event = stripe.Webhook.construct_event(body, sig, STRIPE_WEBHOOK_SECRET)
+        else:
+            event = json.loads(body)
+    except Exception as e:
+        logger.error("Stripe webhook signature verification failed: %s", e)
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    event_type = event.get("type", "") if isinstance(event, dict) else event.type
+    data = event.get("data", {}).get("object", {}) if isinstance(event, dict) else event.data.object
+
+    logger.info("Stripe webhook: %s", event_type)
+
+    db = get_db()
+    try:
+        if event_type == "checkout.session.completed":
+            org_id = data.get("metadata", {}).get("org_id") if isinstance(data, dict) else data.metadata.get("org_id")
+            sub_id = data.get("subscription") if isinstance(data, dict) else data.subscription
+            cust_id = data.get("customer") if isinstance(data, dict) else data.customer
+            if org_id:
+                db.execute(
+                    "UPDATE organizations SET plan = 'business', max_companies = 50, stripe_subscription_id = ?, stripe_customer_id = ?, subscription_status = 'active' WHERE id = ?",
+                    (sub_id, cust_id, org_id),
+                )
+                db.commit()
+                logger.info("Org %s upgraded to Business plan", org_id)
+
+        elif event_type in ("customer.subscription.updated", "customer.subscription.deleted"):
+            sub_obj = data
+            sub_status = sub_obj.get("status") if isinstance(sub_obj, dict) else sub_obj.status
+            sub_id = sub_obj.get("id") if isinstance(sub_obj, dict) else sub_obj.id
+            org_id = (sub_obj.get("metadata", {}) if isinstance(sub_obj, dict) else sub_obj.metadata).get("org_id")
+
+            if not org_id:
+                # Fallback: find org by stripe_subscription_id
+                row = db.execute("SELECT id FROM organizations WHERE stripe_subscription_id = ?", (sub_id,)).fetchone()
+                org_id = row["id"] if row else None
+
+            if org_id:
+                if sub_status in ("active", "trialing"):
+                    db.execute(
+                        "UPDATE organizations SET subscription_status = 'active', plan = 'business', max_companies = 50 WHERE id = ?",
+                        (org_id,),
+                    )
+                elif sub_status == "past_due":
+                    db.execute(
+                        "UPDATE organizations SET subscription_status = 'past_due' WHERE id = ?",
+                        (org_id,),
+                    )
+                elif sub_status in ("canceled", "unpaid", "incomplete_expired"):
+                    db.execute(
+                        "UPDATE organizations SET subscription_status = 'canceled', plan = 'free', max_companies = 3 WHERE id = ?",
+                        (org_id,),
+                    )
+                db.commit()
+                logger.info("Org %s subscription updated: %s", org_id, sub_status)
+
+        elif event_type == "invoice.payment_failed":
+            cust_id = data.get("customer") if isinstance(data, dict) else data.customer
+            row = db.execute("SELECT id FROM organizations WHERE stripe_customer_id = ?", (cust_id,)).fetchone()
+            if row:
+                db.execute("UPDATE organizations SET subscription_status = 'past_due' WHERE id = ?", (row["id"],))
+                db.commit()
+                logger.warning("Payment failed for org %s", row["id"])
+    finally:
+        db.close()
+
+    return {"status": "ok"}
 
 
 # =====================================================================
