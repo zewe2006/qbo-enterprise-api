@@ -49,7 +49,7 @@ from typing import List, Optional
 # ---------- AI Chat Config ----------
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-AI_MODEL = os.environ.get("AI_MODEL", "gemini-2.0-flash")
+AI_MODEL = os.environ.get("AI_MODEL", "gemini-2.0-flash-lite")
 
 # ---------- Stripe Config ----------
 
@@ -3216,9 +3216,8 @@ async def chat(req: ChatMessage, authorization: str = Header(None)):
                 contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
         contents.append({"role": "user", "parts": [{"text": req.message}]})
 
-        # Call Google Gemini API (v1beta for 2.x models, v1 for 1.x models)
-        api_version = "v1beta" if AI_MODEL.startswith("gemini-2") else "v1"
-        gemini_url = f"https://generativelanguage.googleapis.com/{api_version}/models/{AI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        # Call Google Gemini API
+        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{AI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
@@ -3277,8 +3276,7 @@ async def test_gemini():
     if not GEMINI_API_KEY:
         return {"status": "error", "detail": "GEMINI_API_KEY not set", "key_length": 0}
     try:
-        api_version = "v1beta" if AI_MODEL.startswith("gemini-2") else "v1"
-        gemini_url = f"https://generativelanguage.googleapis.com/{api_version}/models/{AI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{AI_MODEL}:generateContent?key={GEMINI_API_KEY}"
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 gemini_url,
