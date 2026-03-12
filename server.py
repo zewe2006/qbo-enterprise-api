@@ -3383,7 +3383,7 @@ Today's date: {today}.
 async def _call_gemini(system_msg: str, contents: list, max_tokens: int = 2000) -> str:
     """Call Gemini API and return the text reply."""
     gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{AI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
             gemini_url,
             headers={"Content-Type": "application/json"},
@@ -3400,11 +3400,28 @@ async def _call_gemini(system_msg: str, contents: list, max_tokens: int = 2000) 
         logger.error("Gemini API error: %s %s", resp.status_code, resp.text[:500])
         raise HTTPException(status_code=502, detail="AI service error. Please try again.")
     data = resp.json()
+    # Check for blocked/empty responses
+    candidates = data.get("candidates", [])
+    if not candidates:
+        block_reason = data.get("promptFeedback", {}).get("blockReason", "unknown")
+        logger.error("Gemini: no candidates. blockReason=%s, response=%s", block_reason, json.dumps(data)[:1000])
+        raise HTTPException(status_code=502, detail=f"AI response was blocked ({block_reason}). Please try rephrasing.")
+    candidate = candidates[0]
+    finish_reason = candidate.get("finishReason", "")
     try:
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        return candidate["content"]["parts"][0]["text"]
     except (KeyError, IndexError):
-        logger.error("Gemini unexpected response: %s", json.dumps(data)[:500])
-        raise HTTPException(status_code=502, detail="AI returned an unexpected response.")
+        logger.error("Gemini unexpected response (finishReason=%s): %s", finish_reason, json.dumps(data)[:1000])
+        raise HTTPException(status_code=502, detail=f"AI returned an unexpected response (reason: {finish_reason}).")
+
+
+async def _call_gemini_safe(system_msg: str, contents: list, max_tokens: int = 2000) -> str:
+    """Like _call_gemini but returns None instead of raising on failure."""
+    try:
+        return await _call_gemini(system_msg, contents, max_tokens)
+    except Exception as e:
+        logger.error("_call_gemini_safe failed: %s", str(e))
+        return None
 
 
 async def _chat_fetch_report_data(fetch_params: dict, org_id: str) -> str:
@@ -3540,13 +3557,30 @@ async def chat(req: ChatMessage, authorization: str = Header(None)):
 
                 # Fetch the actual report data
                 report_data = await _chat_fetch_report_data(fetch_params, org_id)
+                logger.info("Chat: fetched report data, length=%d chars", len(report_data))
 
-                # === PASS 2: Call AI again with the actual data ===
-                # Add the AI's first response and the data as context
-                contents.append({"role": "model", "parts": [{"text": reply}]})
-                contents.append({"role": "user", "parts": [{"text": f"Here is the financial data you requested:\n\n{report_data}\n\nNow answer the user's original question using this data. Be specific with actual dollar amounts. Format numbers with dollar signs and commas. If the user asked about all stores, show a per-company breakdown. After your answer, you may optionally include an action:show_report block so the user can view the full report."}]})
+                # Truncate if too large (keep under ~6000 chars for the data)
+                if len(report_data) > 8000:
+                    report_data = report_data[:8000] + "\n... (data truncated for brevity)"
 
-                reply = await _call_gemini(system_msg, contents, max_tokens=4000)
+                # === PASS 2: Call AI again with JUST the data and original question ===
+                # Use a simplified system prompt and fresh contents to stay within token limits
+                pass2_system = """You are a financial assistant. The user asked a financial question and we fetched the data from QuickBooks Online. Answer the question using the data provided. Be specific with actual dollar amounts formatted with $ and commas. If per-company data is available, show a summary table or list. Be concise.
+
+After your answer, you may optionally include this block so the user can view the full report:
+```action:show_report
+{"report_type": "profit-loss", "company_id": "all", "period": "custom", "start_date": "START", "end_date": "END"}
+```"""
+                pass2_contents = [
+                    {"role": "user", "parts": [{"text": f"Original question: {req.message}\n\nHere is the financial data:\n\n{report_data}"}]},
+                ]
+
+                pass2_reply = await _call_gemini_safe(pass2_system, pass2_contents, max_tokens=4000)
+                if pass2_reply:
+                    reply = pass2_reply
+                else:
+                    # Fallback: build a basic answer from the data directly
+                    reply = f"Here is the data I found:\n\n{report_data}\n\n_(Note: I couldn't generate a formatted summary. The raw data is shown above.)_"
             except (json.JSONDecodeError, Exception) as e:
                 logger.error("Chat fetch_data error: %s", str(e), exc_info=True)
                 # Fall back to the original reply if data fetch fails
