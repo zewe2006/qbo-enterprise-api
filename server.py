@@ -3234,8 +3234,9 @@ async def chat(req: ChatMessage, authorization: str = Header(None)):
             )
 
         if resp.status_code != 200:
-            logger.error("Gemini API error: %s %s", resp.status_code, resp.text[:300])
-            raise HTTPException(status_code=502, detail="AI service error. Please try again.")
+            err_detail = resp.text[:500]
+            logger.error("Gemini API error: %s %s", resp.status_code, err_detail)
+            raise HTTPException(status_code=502, detail=f"AI service error ({resp.status_code}): {err_detail}")
 
         data = resp.json()
         try:
