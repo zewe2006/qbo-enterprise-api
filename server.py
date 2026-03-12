@@ -3544,24 +3544,80 @@ _FINANCIAL_KEYWORDS = [
     "best performing", "worst performing", "highest", "lowest",
 ]
 
-_PERIOD_PATTERNS = {
-    "last month": lambda now: (
-        f"{(now.year if now.month > 1 else now.year - 1)}-{((now.month - 1) or 12):02d}-01",
-        f"{(now.year if now.month > 1 else now.year - 1)}-{((now.month - 1) or 12):02d}-{calendar.monthrange(now.year if now.month > 1 else now.year - 1, (now.month - 1) or 12)[1]:02d}"
-    ),
-    "this month": lambda now: (
-        f"{now.year}-{now.month:02d}-01",
-        now.strftime("%Y-%m-%d")
-    ),
-    "year to date": lambda now: (
-        f"{now.year}-01-01",
-        now.strftime("%Y-%m-%d")
-    ),
-    "ytd": lambda now: (
-        f"{now.year}-01-01",
-        now.strftime("%Y-%m-%d")
-    ),
+_MONTH_NAMES = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6,
+    "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
 }
+
+
+def _parse_period(msg_lower: str, now: datetime) -> tuple:
+    """Parse a date period from a chat message. Returns (start_date, end_date) strings."""
+
+    # Check if there's a specific month mentioned (before checking year-level patterns)
+    has_month = any(m in msg_lower for m in _MONTH_NAMES)
+
+    # "last year" / "prior year" (only if no specific month is also mentioned)
+    if not has_month and ("last year" in msg_lower or "prior year" in msg_lower):
+        y = now.year - 1
+        return f"{y}-01-01", f"{y}-12-31"
+
+    # "this year" / "year to date" / "ytd" (only if no specific month)
+    if not has_month and ("this year" in msg_lower or "year to date" in msg_lower or "ytd" in msg_lower):
+        return f"{now.year}-01-01", now.strftime("%Y-%m-%d")
+
+    # "last month"
+    if "last month" in msg_lower:
+        lm = (now.month - 1) or 12
+        ly = now.year if now.month > 1 else now.year - 1
+        last_day = calendar.monthrange(ly, lm)[1]
+        return f"{ly}-{lm:02d}-01", f"{ly}-{lm:02d}-{last_day:02d}"
+
+    # "this month"
+    if "this month" in msg_lower:
+        return f"{now.year}-{now.month:02d}-01", now.strftime("%Y-%m-%d")
+
+    # Quarters: "q1", "q2", "q3", "q4" optionally with year
+    q_match = _re.search(r'q([1-4])\s*(\d{4})?', msg_lower)
+    if q_match:
+        q = int(q_match.group(1))
+        y = int(q_match.group(2)) if q_match.group(2) else now.year
+        start_month = (q - 1) * 3 + 1
+        end_month = start_month + 2
+        last_day = calendar.monthrange(y, end_month)[1]
+        return f"{y}-{start_month:02d}-01", f"{y}-{end_month:02d}-{last_day:02d}"
+
+    # Specific month + optional year: "january 2025", "feb", "march 2026", "december last year"
+    for month_name, month_num in _MONTH_NAMES.items():
+        if month_name in msg_lower:
+            # Check for explicit year
+            year_match = _re.search(month_name + r'\s+(\d{4})', msg_lower)
+            if year_match:
+                y = int(year_match.group(1))
+            elif "last year" in msg_lower or "prior year" in msg_lower:
+                y = now.year - 1
+            else:
+                # If the month is in the future this year, assume last year
+                y = now.year
+                if month_num > now.month:
+                    y -= 1
+                # If the month is the current month, use this year
+            last_day = calendar.monthrange(y, month_num)[1]
+            return f"{y}-{month_num:02d}-01", f"{y}-{month_num:02d}-{last_day:02d}"
+
+    # Explicit year only: "2025", "in 2024"
+    year_only = _re.search(r'\b(20[0-9]{2})\b', msg_lower)
+    if year_only:
+        y = int(year_only.group(1))
+        if y != now.year:  # Only if it's not the current year (avoid matching random numbers)
+            return f"{y}-01-01", f"{y}-12-31"
+
+    # Default: last month
+    lm = (now.month - 1) or 12
+    ly = now.year if now.month > 1 else now.year - 1
+    last_day = calendar.monthrange(ly, lm)[1]
+    return f"{ly}-{lm:02d}-01", f"{ly}-{lm:02d}-{last_day:02d}"
 
 
 def _detect_financial_query(message: str) -> Optional[dict]:
@@ -3573,15 +3629,7 @@ def _detect_financial_query(message: str) -> Optional[dict]:
         return None
 
     now = datetime.now()
-    # Detect period
-    start_date, end_date = None, None
-    for pattern, date_fn in _PERIOD_PATTERNS.items():
-        if pattern in msg_lower:
-            start_date, end_date = date_fn(now)
-            break
-    if not start_date:
-        # Default to last month
-        start_date, end_date = _PERIOD_PATTERNS["last month"](now)
+    start_date, end_date = _parse_period(msg_lower, now)
 
     # Detect report type
     report_type = "profit-loss"  # default
