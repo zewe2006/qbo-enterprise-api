@@ -3675,8 +3675,8 @@ async def chat(req: ChatMessage, authorization: str = Header(None)):
                 report_data = await _chat_fetch_report_data(fetch_params, org_id)
                 if len(report_data) > 10000:
                     report_data = report_data[:10000] + "\n... (truncated)"
-                financial_context = f"LIVE FINANCIAL DATA (use these numbers to answer):\n{report_data}"
-                logger.info("Chat: fetched financial data, %d chars", len(financial_context))
+                financial_context = f"LIVE FINANCIAL DATA (use these numbers to answer the user's question):\nRequested period: {fetch_params.get('start_date')} to {fetch_params.get('end_date')}\n{report_data}"
+                logger.info("Chat: fetched financial data for %s to %s, %d chars", fetch_params.get('start_date'), fetch_params.get('end_date'), len(financial_context))
             except Exception as e:
                 logger.warning("Chat: failed to fetch financial data: %s", str(e))
                 financial_context = "(Financial data could not be loaded. Suggest the user check the report page directly.)"
