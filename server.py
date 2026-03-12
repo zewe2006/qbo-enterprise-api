@@ -104,12 +104,22 @@ def get_db():
 def init_db():
     db = get_db()
     db.executescript("""
+        CREATE TABLE IF NOT EXISTS organizations (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            slug TEXT UNIQUE,
+            owner_id TEXT,
+            plan TEXT DEFAULT 'free',
+            max_companies INTEGER DEFAULT 5,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             name TEXT,
             role TEXT DEFAULT 'user',
+            org_id TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS sessions (
@@ -121,6 +131,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS companies (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
+            org_id TEXT,
             legal_name TEXT,
             qbo_company_id TEXT,
             qbo_realm_id TEXT,
@@ -169,6 +180,7 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS intercompany_entries (
             id TEXT PRIMARY KEY,
+            org_id TEXT,
             source_company_id TEXT NOT NULL,
             dest_company_id TEXT NOT NULL,
             entry_type TEXT NOT NULL,
@@ -204,6 +216,7 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS ic_templates (
             id TEXT PRIMARY KEY,
+            org_id TEXT,
             name TEXT NOT NULL,
             source_company_id TEXT,
             dest_company_id TEXT,
@@ -218,6 +231,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS oauth_states (
             state TEXT PRIMARY KEY,
             redirect_uri TEXT,
+            org_id TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS user_company_access (
@@ -245,14 +259,42 @@ def init_db():
                 "dest_debit_entity_id", "dest_credit_entity_id"]:
         _add_column_safe(db, "intercompany_entries", col, "TEXT")
 
+    # Multi-tenant migration
+    _add_column_safe(db, "users", "org_id", "TEXT")
+    _add_column_safe(db, "companies", "org_id", "TEXT")
+    _add_column_safe(db, "intercompany_entries", "org_id", "TEXT")
+    _add_column_safe(db, "ic_templates", "org_id", "TEXT")
+    _add_column_safe(db, "oauth_states", "org_id", "TEXT")
+
+    # Create default org for existing data if not exists
+    existing_org = db.execute("SELECT id FROM organizations LIMIT 1").fetchone()
+    if not existing_org:
+        first_admin = db.execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1").fetchone()
+        if first_admin:
+            default_org_id = "org-default"
+            db.execute(
+                "INSERT OR IGNORE INTO organizations (id, name, slug, owner_id) VALUES (?, ?, ?, ?)",
+                (default_org_id, "Default Organization", "default", first_admin["id"]),
+            )
+            db.execute("UPDATE users SET org_id = ? WHERE org_id IS NULL", (default_org_id,))
+            db.execute("UPDATE companies SET org_id = ? WHERE org_id IS NULL", (default_org_id,))
+            db.execute("UPDATE intercompany_entries SET org_id = ? WHERE org_id IS NULL", (default_org_id,))
+            db.execute("UPDATE ic_templates SET org_id = ? WHERE org_id IS NULL", (default_org_id,))
+            db.commit()
+
     # Default admin user
     existing = db.execute("SELECT id FROM users LIMIT 1").fetchone()
     if not existing:
         admin_id = str(uuid.uuid4())
+        default_org_id = "org-default"
         pw_hash = hashlib.sha256("admin123".encode()).hexdigest()
         db.execute(
-            "INSERT INTO users (id, email, password_hash, name, role) VALUES (?, ?, ?, ?, ?)",
-            (admin_id, "admin@enterpriseledger.local", pw_hash, "Admin", "admin"),
+            "INSERT OR IGNORE INTO organizations (id, name, slug, owner_id) VALUES (?, ?, ?, ?)",
+            (default_org_id, "Default Organization", "default", admin_id),
+        )
+        db.execute(
+            "INSERT INTO users (id, email, password_hash, name, role, org_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (admin_id, "admin@enterpriseledger.local", pw_hash, "Admin", "admin", default_org_id),
         )
         db.commit()
 
@@ -288,7 +330,7 @@ def _seed_from_cached_files(db):
     else:
         cid = str(uuid.uuid4())
 
-    _upsert_company_from_info(db, cid, info, "connected")
+    _upsert_company_from_info(db, cid, info, "connected", org_id="org-default")
 
     report_files = {
         "farm_noodle_pl_ytd.json": ("profit_loss", "2026-ytd"),
@@ -325,7 +367,7 @@ def _seed_from_cached_files(db):
 
 def _upsert_company_from_info(db, cid, info, status, realm_id=None,
                                 access_token=None, refresh_token=None,
-                                token_expires_at=None):
+                                token_expires_at=None, org_id=None):
     """Insert or update a company record from QBO CompanyInfo."""
     name = info.get("CompanyName", "Unknown")
     legal = info.get("LegalName", "")
@@ -360,17 +402,20 @@ def _upsert_company_from_info(db, cid, info, status, realm_id=None,
         if token_expires_at is not None:
             sql += ", token_expires_at=?"
             params.append(token_expires_at)
+        if org_id is not None:
+            sql += ", org_id=?"
+            params.append(org_id)
         sql += " WHERE id=?"
         params.append(cid)
         db.execute(sql, params)
     else:
         db.execute(
             """INSERT INTO companies
-               (id, name, legal_name, qbo_company_id, qbo_realm_id,
+               (id, name, org_id, legal_name, qbo_company_id, qbo_realm_id,
                 access_token, refresh_token, token_expires_at,
                 address, phone, email, industry, qbo_plan, status, last_synced)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
-            (cid, name, legal, qbo_id, realm_id or "",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+            (cid, name, org_id or "", legal, qbo_id, realm_id or "",
              access_token or "", refresh_token or "", token_expires_at or "",
              address_str, phone, email_addr, industry, qbo_plan, status),
         )
@@ -616,6 +661,7 @@ class RegisterRequest(BaseModel):
     email: str
     password: str
     name: str
+    org_name: str = ""
 
 class CreateUserRequest(BaseModel):
     email: str
@@ -656,15 +702,26 @@ def get_current_user(token: str):
     access_rows = db.execute(
         "SELECT company_id FROM user_company_access WHERE user_id = ?", (user["id"],)
     ).fetchall()
+    org = db.execute("SELECT * FROM organizations WHERE id = ?", (user["org_id"],)).fetchone() if user["org_id"] else None
     db.close()
     u = dict(user)
     u["company_ids"] = [r["company_id"] for r in access_rows]
+    u["org_id"] = user.get("org_id", "")
+    u["org_name"] = org["name"] if org else ""
     return u
 
 
 def require_admin(user: dict):
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def get_org_id(user):
+    """Get the org_id for the current user. All data queries must use this."""
+    org_id = user.get("org_id")
+    if not org_id:
+        raise HTTPException(status_code=403, detail="User is not associated with an organization.")
+    return org_id
 
 
 @app.post("/api/auth/login")
@@ -685,6 +742,7 @@ async def login(req: LoginRequest):
     access_rows = db.execute(
         "SELECT company_id FROM user_company_access WHERE user_id = ?", (user["id"],)
     ).fetchall()
+    org = db.execute("SELECT name FROM organizations WHERE id = ?", (user["org_id"],)).fetchone() if user["org_id"] else None
     db.close()
     return {
         "token": token,
@@ -692,6 +750,7 @@ async def login(req: LoginRequest):
             "id": user["id"], "email": user["email"], "name": user["name"],
             "role": user["role"],
             "company_ids": [r["company_id"] for r in access_rows],
+            "org_id": user.get("org_id", ""), "org_name": org["name"] if org else "",
         },
     }
 
@@ -702,26 +761,37 @@ async def register(req: RegisterRequest):
     if len(req.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
     email = req.email.strip().lower()
+    org_name = (req.org_name or "").strip() or f"{req.name.strip()}'s Organization"
     db = get_db()
     existing = db.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
     if existing:
         db.close()
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
     user_id = str(uuid.uuid4())
+    org_id = str(uuid.uuid4())
+    org_slug = org_name.lower().replace(" ", "-").replace("'", "")[:50]
+    # Check slug uniqueness, append random if taken
+    if db.execute("SELECT id FROM organizations WHERE slug = ?", (org_slug,)).fetchone():
+        org_slug = org_slug[:40] + "-" + secrets.token_hex(4)
     pw_hash = hashlib.sha256(req.password.encode()).hexdigest()
-    # New sign-ups get "viewer" role with no company access until admin assigns
+    # Create organization
     db.execute(
-        "INSERT INTO users (id, email, password_hash, name, role) VALUES (?, ?, ?, ?, ?)",
-        (user_id, email, pw_hash, req.name.strip(), "viewer"),
+        "INSERT INTO organizations (id, name, slug, owner_id) VALUES (?, ?, ?, ?)",
+        (org_id, org_name, org_slug, user_id),
     )
-    # Auto-login: generate session token
+    # Create user as org admin
+    db.execute(
+        "INSERT INTO users (id, email, password_hash, name, role, org_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, email, pw_hash, req.name.strip(), "admin", org_id),
+    )
+    # Auto-login
     token = str(uuid.uuid4())
     db.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
     db.commit()
     db.close()
     return {
         "token": token,
-        "user": {"id": user_id, "email": email, "name": req.name.strip(), "role": "viewer", "company_ids": []},
+        "user": {"id": user_id, "email": email, "name": req.name.strip(), "role": "admin", "company_ids": [], "org_id": org_id, "org_name": org_name},
     }
 
 @app.get("/api/auth/me")
@@ -731,6 +801,7 @@ async def get_me(authorization: str = Header(None)):
     return {
         "id": user["id"], "email": user["email"], "name": user["name"],
         "role": user["role"], "company_ids": user.get("company_ids", []),
+        "org_id": user.get("org_id", ""), "org_name": user.get("org_name", ""),
     }
 
 @app.post("/api/auth/logout")
@@ -768,8 +839,9 @@ async def list_users(authorization: str = Header(None)):
     token = _extract_token(authorization)
     user = get_current_user(token)
     require_admin(user)
+    org_id = get_org_id(user)
     db = get_db()
-    rows = db.execute("SELECT id, email, name, role, created_at FROM users ORDER BY created_at").fetchall()
+    rows = db.execute("SELECT id, email, name, role, created_at FROM users WHERE org_id = ? ORDER BY created_at", (org_id,)).fetchall()
     users = []
     for r in rows:
         u = dict(r)
@@ -786,6 +858,7 @@ async def create_user(req: CreateUserRequest, authorization: str = Header(None))
     token = _extract_token(authorization)
     admin = get_current_user(token)
     require_admin(admin)
+    org_id = get_org_id(admin)
     if req.role not in ("admin", "viewer"):
         raise HTTPException(status_code=400, detail="Role must be 'admin' or 'viewer'")
     db = get_db()
@@ -796,8 +869,8 @@ async def create_user(req: CreateUserRequest, authorization: str = Header(None))
     user_id = str(uuid.uuid4())
     pw_hash = hashlib.sha256(req.password.encode()).hexdigest()
     db.execute(
-        "INSERT INTO users (id, email, password_hash, name, role) VALUES (?, ?, ?, ?, ?)",
-        (user_id, req.email, pw_hash, req.name, req.role),
+        "INSERT INTO users (id, email, password_hash, name, role, org_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, req.email, pw_hash, req.name, req.role, org_id),
     )
     # Assign company access
     for cid in req.company_ids:
@@ -814,8 +887,9 @@ async def update_user(user_id: str, req: UpdateUserRequest, authorization: str =
     token = _extract_token(authorization)
     admin = get_current_user(token)
     require_admin(admin)
+    org_id = get_org_id(admin)
     db = get_db()
-    user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    user = db.execute("SELECT * FROM users WHERE id = ? AND org_id = ?", (user_id, org_id)).fetchone()
     if not user:
         db.close()
         raise HTTPException(status_code=404, detail="User not found")
@@ -856,12 +930,17 @@ async def delete_user(user_id: str, authorization: str = Header(None)):
     token = _extract_token(authorization)
     admin = get_current_user(token)
     require_admin(admin)
+    org_id = get_org_id(admin)
     if user_id == admin["id"]:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
     db = get_db()
+    target = db.execute("SELECT id FROM users WHERE id = ? AND org_id = ?", (user_id, org_id)).fetchone()
+    if not target:
+        db.close()
+        raise HTTPException(status_code=404, detail="User not found")
     db.execute("DELETE FROM user_company_access WHERE user_id = ?", (user_id,))
     db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
-    db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    db.execute("DELETE FROM users WHERE id = ? AND org_id = ?", (user_id, org_id))
     db.commit()
     db.close()
     return {"deleted": user_id}
@@ -876,12 +955,16 @@ class AuthorizeRequest(BaseModel):
 
 
 @app.post("/api/qbo/authorize")
-async def qbo_authorize(request: Request, body: AuthorizeRequest = None):
+async def qbo_authorize(request: Request, body: AuthorizeRequest = None, authorization: str = Header(None)):
     """Generate a QBO OAuth authorization URL.
 
     The frontend opens this URL in a popup window. After the user signs in
     and selects a company, QBO redirects to our callback endpoint.
     """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+
     # Use the fixed redirect URI if configured (recommended for production).
     # This MUST match exactly what is registered in the Intuit Developer portal.
     if QBO_REDIRECT_URI:
@@ -898,11 +981,11 @@ async def qbo_authorize(request: Request, body: AuthorizeRequest = None):
 
     state = secrets.token_urlsafe(32)
 
-    # Store state + redirect_uri for validation in the callback
+    # Store state + redirect_uri + org_id for validation in the callback
     db = get_db()
     db.execute(
-        "INSERT INTO oauth_states (state, redirect_uri) VALUES (?, ?)",
-        (state, redirect_uri),
+        "INSERT INTO oauth_states (state, redirect_uri, org_id) VALUES (?, ?, ?)",
+        (state, redirect_uri, org_id),
     )
     # Clean up old states (older than 1 hour)
     db.execute("DELETE FROM oauth_states WHERE created_at < datetime('now', '-60 minutes')")
@@ -950,7 +1033,7 @@ async def qbo_callback(request: Request, code: str = None, state: str = None,
     # Validate state and retrieve the stored redirect_uri
     db = get_db()
     state_row = db.execute(
-        "SELECT state, redirect_uri FROM oauth_states WHERE state = ?", (state,)
+        "SELECT state, redirect_uri, org_id FROM oauth_states WHERE state = ?", (state,)
     ).fetchone()
     if not state_row:
         # Log all existing states for debugging
@@ -973,6 +1056,7 @@ async def qbo_callback(request: Request, code: str = None, state: str = None,
     # Use the redirect_uri stored when we created the authorize URL
     # This MUST match exactly what was sent to Intuit
     redirect_uri = state_row["redirect_uri"]
+    oauth_org_id = state_row["org_id"]
 
     db.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
     db.commit()
@@ -1083,6 +1167,7 @@ async def qbo_callback(request: Request, code: str = None, state: str = None,
         access_token=access_token,
         refresh_token=refresh_token_val,
         token_expires_at=expires_at,
+        org_id=oauth_org_id,
     )
     db.close()
 
@@ -1127,13 +1212,15 @@ async def qbo_callback(request: Request, code: str = None, state: str = None,
 async def list_companies(authorization: str = Header(None)):
     token = _extract_token(authorization)
     user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
     rows = db.execute(
         """SELECT id, name, legal_name, qbo_company_id, qbo_realm_id,
                   status, last_synced, created_at, address, phone, email,
                   industry, qbo_plan,
                   CASE WHEN access_token IS NOT NULL AND access_token != '' THEN 1 ELSE 0 END as has_token
-           FROM companies ORDER BY name"""
+           FROM companies WHERE org_id = ? ORDER BY name""",
+        (org_id,),
     ).fetchall()
     db.close()
     companies = [dict(r) for r in rows]
@@ -1145,13 +1232,17 @@ async def list_companies(authorization: str = Header(None)):
 
 
 @app.get("/api/companies/connected")
-async def get_connected_company():
+async def get_connected_company(authorization: str = Header(None)):
     """Get the first connected company with valid tokens for the header badge."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
     row = db.execute(
         """SELECT id, name, qbo_realm_id, access_token, refresh_token
            FROM companies WHERE status='connected' AND qbo_realm_id IS NOT NULL
-           AND qbo_realm_id != '' LIMIT 1"""
+           AND qbo_realm_id != '' AND org_id = ? LIMIT 1""",
+        (org_id,),
     ).fetchone()
     db.close()
 
@@ -1165,11 +1256,14 @@ async def get_connected_company():
 
 
 @app.post("/api/companies/{company_id}/sync")
-async def sync_company(company_id: str):
+async def sync_company(company_id: str, authorization: str = Header(None)):
     """Pull ALL data from a specific company using its stored tokens."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
 
-    company = db.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone()
+    company = db.execute("SELECT * FROM companies WHERE id = ? AND org_id = ?", (company_id, org_id)).fetchone()
     if not company:
         db.close()
         raise HTTPException(status_code=404, detail="Company not found")
@@ -1263,20 +1357,34 @@ async def sync_company(company_id: str):
 
 
 @app.delete("/api/companies/{company_id}")
-async def delete_company(company_id: str):
+async def delete_company(company_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
+    company = db.execute("SELECT id FROM companies WHERE id = ? AND org_id = ?", (company_id, org_id)).fetchone()
+    if not company:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
     db.execute("DELETE FROM company_reports WHERE company_id = ?", (company_id,))
     db.execute("DELETE FROM company_accounts WHERE company_id = ?", (company_id,))
     db.execute("DELETE FROM account_mappings WHERE company_id = ?", (company_id,))
-    db.execute("DELETE FROM companies WHERE id = ?", (company_id,))
+    db.execute("DELETE FROM companies WHERE id = ? AND org_id = ?", (company_id, org_id))
     db.commit()
     db.close()
     return {"deleted": company_id}
 
 
 @app.get("/api/companies/{company_id}/accounts")
-async def get_company_accounts(company_id: str):
+async def get_company_accounts(company_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
+    company = db.execute("SELECT id FROM companies WHERE id = ? AND org_id = ?", (company_id, org_id)).fetchone()
+    if not company:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
     rows = db.execute(
         """SELECT * FROM company_accounts WHERE company_id = ? AND active = 1
            ORDER BY classification, account_type, name""",
@@ -1287,9 +1395,16 @@ async def get_company_accounts(company_id: str):
 
 
 @app.get("/api/companies/{company_id}/customers")
-async def get_company_customers(company_id: str):
+async def get_company_customers(company_id: str, authorization: str = Header(None)):
     """Fetch active customers from QBO for a specific company."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
+    company = db.execute("SELECT id FROM companies WHERE id = ? AND org_id = ?", (company_id, org_id)).fetchone()
+    if not company:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
     try:
         result = await qbo_api_call(
             db, company_id, "query", method="GET",
@@ -1306,9 +1421,16 @@ async def get_company_customers(company_id: str):
 
 
 @app.get("/api/companies/{company_id}/vendors")
-async def get_company_vendors(company_id: str):
+async def get_company_vendors(company_id: str, authorization: str = Header(None)):
     """Fetch active vendors from QBO for a specific company."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
+    company = db.execute("SELECT id FROM companies WHERE id = ? AND org_id = ?", (company_id, org_id)).fetchone()
+    if not company:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
     try:
         result = await qbo_api_call(
             db, company_id, "query", method="GET",
@@ -1353,28 +1475,37 @@ class ReportParams(BaseModel):
 
 
 @app.post("/api/reports/profit-loss")
-async def get_profit_loss(params: ReportParams):
+async def get_profit_loss(params: ReportParams, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     if params.company_id == "all":
         # Always try live first for consolidated to avoid stale/empty cache
         try:
-            result = await _get_live_consolidated(params, "ProfitAndLoss", "profit_loss")
+            result = await _get_live_consolidated(params, "ProfitAndLoss", "profit_loss", org_id)
             if result.get("current") is not None:
                 return result
         except Exception:
             pass
         # Fall back to cache
-        return _get_cached_report(params, "profit_loss")
+        return _get_cached_report(params, "profit_loss", org_id)
     if params.company_id:
         return await _get_live_report_for_company(params, "ProfitAndLoss", "profit_loss")
     return {"current": None, "message": "Select a company"}
 
 
-async def _get_live_consolidated(params, qbo_report_name, report_type):
+async def _get_live_consolidated(params, qbo_report_name, report_type, org_id=None):
     """Pull live reports from selected (or all) connected companies and merge them."""
     db = get_db()
-    companies = db.execute(
-        "SELECT id, name, qbo_realm_id, refresh_token FROM companies WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != ''"
-    ).fetchall()
+    if org_id:
+        companies = db.execute(
+            "SELECT id, name, qbo_realm_id, refresh_token FROM companies WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != '' AND org_id = ?",
+            (org_id,),
+        ).fetchall()
+    else:
+        companies = db.execute(
+            "SELECT id, name, qbo_realm_id, refresh_token FROM companies WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != ''"
+        ).fetchall()
     db.close()
 
     # Filter by selected company_ids if provided
@@ -1450,30 +1581,36 @@ async def _get_live_consolidated(params, qbo_report_name, report_type):
 
 
 @app.post("/api/reports/balance-sheet")
-async def get_balance_sheet(params: ReportParams):
+async def get_balance_sheet(params: ReportParams, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     if params.company_id == "all":
         try:
-            result = await _get_live_consolidated(params, "BalanceSheet", "balance_sheet")
+            result = await _get_live_consolidated(params, "BalanceSheet", "balance_sheet", org_id)
             if result.get("current") is not None:
                 return result
         except Exception:
             pass
-        return _get_cached_report(params, "balance_sheet")
+        return _get_cached_report(params, "balance_sheet", org_id)
     if params.company_id:
         return await _get_live_report_for_company(params, "BalanceSheet", "balance_sheet")
     return {"current": None, "message": "Select a company"}
 
 
 @app.post("/api/reports/cash-flow")
-async def get_cash_flow(params: ReportParams):
+async def get_cash_flow(params: ReportParams, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     if params.company_id == "all":
         try:
-            result = await _get_live_consolidated(params, "CashFlow", "cash_flow")
+            result = await _get_live_consolidated(params, "CashFlow", "cash_flow", org_id)
             if result.get("current") is not None:
                 return result
         except Exception:
             pass
-        return _get_cached_report(params, "cash_flow")
+        return _get_cached_report(params, "cash_flow", org_id)
     if params.company_id:
         return await _get_live_report_for_company(params, "CashFlow", "cash_flow")
     return {"current": None, "message": "Select a company"}
@@ -1490,24 +1627,28 @@ class TransactionDetailParams(BaseModel):
 
 
 @app.post("/api/reports/transaction-detail")
-async def get_transaction_detail(params: TransactionDetailParams):
+async def get_transaction_detail(params: TransactionDetailParams, authorization: str = Header(None)):
     """Drill down into a specific account — returns transaction-level detail from the QBO
     GeneralLedger report, across one or more companies."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
 
     # Determine which companies to query
     if params.company_id == "all" or (not params.company_id):
         companies = db.execute(
             "SELECT id, name, qbo_realm_id, refresh_token FROM companies "
-            "WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != ''"
+            "WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != '' AND org_id = ?",
+            (org_id,),
         ).fetchall()
         if params.company_ids and len(params.company_ids) > 0:
             selected = set(params.company_ids)
             companies = [c for c in companies if c["id"] in selected]
     elif params.company_id:
         companies = db.execute(
-            "SELECT id, name, qbo_realm_id, refresh_token FROM companies WHERE id=?",
-            (params.company_id,)
+            "SELECT id, name, qbo_realm_id, refresh_token FROM companies WHERE id=? AND org_id = ?",
+            (params.company_id, org_id),
         ).fetchall()
     else:
         db.close()
@@ -1750,7 +1891,7 @@ async def _get_live_report_for_company(params, qbo_report_name, report_type):
         return cached
 
 
-def _get_cached_report(params, report_type):
+def _get_cached_report(params, report_type, org_id=None):
     """Return cached report(s) — single company or consolidated across all."""
     db = get_db()
     year = datetime.now().year
@@ -1776,13 +1917,22 @@ def _get_cached_report(params, report_type):
 
     def _find_rows_consolidated(rt, keys):
         for pk in keys:
-            rows = db.execute(
-                """SELECT cr.data_json, c.name AS company_name, c.id AS company_id, cr.period_key
-                   FROM company_reports cr
-                   JOIN companies c ON cr.company_id = c.id
-                   WHERE cr.report_type = ? AND cr.period_key = ?""",
-                (rt, pk),
-            ).fetchall()
+            if org_id:
+                rows = db.execute(
+                    """SELECT cr.data_json, c.name AS company_name, c.id AS company_id, cr.period_key
+                       FROM company_reports cr
+                       JOIN companies c ON cr.company_id = c.id
+                       WHERE cr.report_type = ? AND cr.period_key = ? AND c.org_id = ?""",
+                    (rt, pk, org_id),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """SELECT cr.data_json, c.name AS company_name, c.id AS company_id, cr.period_key
+                       FROM company_reports cr
+                       JOIN companies c ON cr.company_id = c.id
+                       WHERE cr.report_type = ? AND cr.period_key = ?""",
+                    (rt, pk),
+                ).fetchall()
             if rows:
                 return rows, pk
         return [], None
@@ -1964,9 +2114,16 @@ def _add_report_values(base, addition):
 # =====================================================================
 
 @app.get("/api/accounts/cached")
-async def list_cached_accounts(company_id: str = None):
+async def list_cached_accounts(company_id: str = None, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
     if company_id:
+        company = db.execute("SELECT id FROM companies WHERE id = ? AND org_id = ?", (company_id, org_id)).fetchone()
+        if not company:
+            db.close()
+            raise HTTPException(status_code=404, detail="Company not found")
         rows = db.execute(
             """SELECT ca.*, c.name AS company_name FROM company_accounts ca
                JOIN companies c ON ca.company_id = c.id
@@ -1978,8 +2135,9 @@ async def list_cached_accounts(company_id: str = None):
         rows = db.execute(
             """SELECT ca.*, c.name AS company_name FROM company_accounts ca
                JOIN companies c ON ca.company_id = c.id
-               WHERE ca.active = 1
-               ORDER BY c.name, ca.classification, ca.account_type, ca.name"""
+               WHERE ca.active = 1 AND c.org_id = ?
+               ORDER BY c.name, ca.classification, ca.account_type, ca.name""",
+            (org_id,),
         ).fetchall()
     db.close()
     return [dict(r) for r in rows]
@@ -1997,28 +2155,40 @@ class AccountMappingRequest(BaseModel):
     consolidated_subcategory: Optional[str] = None
 
 @app.get("/api/account-mappings")
-async def list_account_mappings(company_id: str = None):
+async def list_account_mappings(company_id: str = None, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
     if company_id:
         rows = db.execute(
             """SELECT am.*, c.name AS company_name FROM account_mappings am
                LEFT JOIN companies c ON am.company_id = c.id
-               WHERE am.company_id = ?
+               WHERE am.company_id = ? AND c.org_id = ?
                ORDER BY am.consolidated_category""",
-            (company_id,),
+            (company_id, org_id),
         ).fetchall()
     else:
         rows = db.execute(
             """SELECT am.*, c.name AS company_name FROM account_mappings am
                LEFT JOIN companies c ON am.company_id = c.id
-               ORDER BY c.name, am.consolidated_category"""
+               WHERE c.org_id = ?
+               ORDER BY c.name, am.consolidated_category""",
+            (org_id,),
         ).fetchall()
     db.close()
     return [dict(r) for r in rows]
 
 @app.post("/api/account-mappings")
-async def create_account_mapping(req: AccountMappingRequest):
+async def create_account_mapping(req: AccountMappingRequest, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
+    company = db.execute("SELECT id FROM companies WHERE id = ? AND org_id = ?", (req.company_id, org_id)).fetchone()
+    if not company:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
     mid = str(uuid.uuid4())
     db.execute(
         """INSERT INTO account_mappings
@@ -2032,8 +2202,20 @@ async def create_account_mapping(req: AccountMappingRequest):
     return {"id": mid}
 
 @app.delete("/api/account-mappings/{mapping_id}")
-async def delete_account_mapping(mapping_id: str):
+async def delete_account_mapping(mapping_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
+    mapping = db.execute(
+        """SELECT am.id FROM account_mappings am
+           JOIN companies c ON am.company_id = c.id
+           WHERE am.id = ? AND c.org_id = ?""",
+        (mapping_id, org_id),
+    ).fetchone()
+    if not mapping:
+        db.close()
+        raise HTTPException(status_code=404, detail="Mapping not found")
     db.execute("DELETE FROM account_mappings WHERE id = ?", (mapping_id,))
     db.commit()
     db.close()
@@ -2072,7 +2254,10 @@ class ICEntryRequest(BaseModel):
     dest_credit_entity_id: Optional[str] = None
 
 @app.get("/api/intercompany")
-async def list_ic_entries():
+async def list_ic_entries(authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
     rows = db.execute(
         """SELECT ie.*,
@@ -2080,7 +2265,9 @@ async def list_ic_entries():
            FROM intercompany_entries ie
            LEFT JOIN companies sc ON ie.source_company_id = sc.id
            LEFT JOIN companies dc ON ie.dest_company_id = dc.id
-           ORDER BY ie.created_at DESC"""
+           WHERE ie.org_id = ?
+           ORDER BY ie.created_at DESC""",
+        (org_id,),
     ).fetchall()
     entries = []
     for r in rows:
@@ -2095,7 +2282,10 @@ async def list_ic_entries():
     return entries
 
 @app.post("/api/intercompany")
-async def create_ic_entry(req: ICEntryRequest):
+async def create_ic_entry(req: ICEntryRequest, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
     lines = req.lines
 
@@ -2121,9 +2311,9 @@ async def create_ic_entry(req: ICEntryRequest):
     entry_id = str(uuid.uuid4())
     db.execute(
         """INSERT INTO intercompany_entries
-           (id, source_company_id, dest_company_id, entry_type, amount, description, date, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')""",
-        (entry_id, req.source_company_id, req.dest_company_id, req.entry_type,
+           (id, org_id, source_company_id, dest_company_id, entry_type, amount, description, date, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+        (entry_id, org_id, req.source_company_id, req.dest_company_id, req.entry_type,
          total_amount, req.description, req.date),
     )
 
@@ -2142,9 +2332,12 @@ async def create_ic_entry(req: ICEntryRequest):
     return {"id": entry_id, "status": "pending"}
 
 @app.post("/api/intercompany/{entry_id}/post")
-async def post_ic_entry(entry_id: str):
+async def post_ic_entry(entry_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
-    entry = db.execute("SELECT * FROM intercompany_entries WHERE id = ?", (entry_id,)).fetchone()
+    entry = db.execute("SELECT * FROM intercompany_entries WHERE id = ? AND org_id = ?", (entry_id, org_id)).fetchone()
     if not entry:
         db.close()
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -2280,9 +2473,12 @@ async def post_ic_entry(entry_id: str):
 
 
 @app.put("/api/intercompany/{entry_id}")
-async def update_ic_entry(entry_id: str, req: ICEntryRequest):
+async def update_ic_entry(entry_id: str, req: ICEntryRequest, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
-    entry = db.execute("SELECT * FROM intercompany_entries WHERE id = ?", (entry_id,)).fetchone()
+    entry = db.execute("SELECT * FROM intercompany_entries WHERE id = ? AND org_id = ?", (entry_id, org_id)).fetchone()
     if not entry:
         db.close()
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -2337,9 +2533,12 @@ async def update_ic_entry(entry_id: str, req: ICEntryRequest):
 
 
 @app.delete("/api/intercompany/{entry_id}")
-async def delete_ic_entry(entry_id: str):
+async def delete_ic_entry(entry_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
-    entry = db.execute("SELECT * FROM intercompany_entries WHERE id = ?", (entry_id,)).fetchone()
+    entry = db.execute("SELECT * FROM intercompany_entries WHERE id = ? AND org_id = ?", (entry_id, org_id)).fetchone()
     if not entry:
         db.close()
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -2366,22 +2565,28 @@ class ICTemplateRequest(BaseModel):
     description: Optional[str] = None
 
 @app.get("/api/intercompany/templates")
-async def list_ic_templates():
+async def list_ic_templates(authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
-    rows = db.execute("SELECT * FROM ic_templates ORDER BY name").fetchall()
+    rows = db.execute("SELECT * FROM ic_templates WHERE org_id = ? ORDER BY name", (org_id,)).fetchall()
     db.close()
     return [dict(r) for r in rows]
 
 @app.post("/api/intercompany/templates")
-async def create_ic_template(req: ICTemplateRequest):
+async def create_ic_template(req: ICTemplateRequest, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
     tid = str(uuid.uuid4())
     db.execute(
         """INSERT INTO ic_templates
-           (id, name, source_company_id, dest_company_id, entry_type,
+           (id, org_id, name, source_company_id, dest_company_id, entry_type,
             source_debit_account, source_credit_account, dest_debit_account, dest_credit_account, description)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (tid, req.name, req.source_company_id, req.dest_company_id, req.entry_type,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (tid, org_id, req.name, req.source_company_id, req.dest_company_id, req.entry_type,
          req.source_debit_account, req.source_credit_account,
          req.dest_debit_account, req.dest_credit_account, req.description),
     )
@@ -2391,15 +2596,22 @@ async def create_ic_template(req: ICTemplateRequest):
 
 
 @app.put("/api/intercompany/templates/{template_id}")
-async def update_ic_template(template_id: str, req: ICTemplateRequest):
+async def update_ic_template(template_id: str, req: ICTemplateRequest, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
+    existing = db.execute("SELECT id FROM ic_templates WHERE id = ? AND org_id = ?", (template_id, org_id)).fetchone()
+    if not existing:
+        db.close()
+        raise HTTPException(status_code=404, detail="Template not found")
     db.execute(
         """UPDATE ic_templates SET name=?, source_company_id=?, dest_company_id=?, entry_type=?,
            source_debit_account=?, source_credit_account=?, dest_debit_account=?, dest_credit_account=?, description=?
-           WHERE id=?""",
+           WHERE id=? AND org_id=?""",
         (req.name, req.source_company_id, req.dest_company_id, req.entry_type,
          req.source_debit_account, req.source_credit_account,
-         req.dest_debit_account, req.dest_credit_account, req.description, template_id),
+         req.dest_debit_account, req.dest_credit_account, req.description, template_id, org_id),
     )
     db.commit()
     db.close()
@@ -2407,9 +2619,16 @@ async def update_ic_template(template_id: str, req: ICTemplateRequest):
 
 
 @app.delete("/api/intercompany/templates/{template_id}")
-async def delete_ic_template(template_id: str):
+async def delete_ic_template(template_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
-    db.execute("DELETE FROM ic_templates WHERE id = ?", (template_id,))
+    existing = db.execute("SELECT id FROM ic_templates WHERE id = ? AND org_id = ?", (template_id, org_id)).fetchone()
+    if not existing:
+        db.close()
+        raise HTTPException(status_code=404, detail="Template not found")
+    db.execute("DELETE FROM ic_templates WHERE id = ? AND org_id = ?", (template_id, org_id))
     db.commit()
     db.close()
     return {"ok": True}
@@ -2425,17 +2644,22 @@ async def dashboard_summary(
     start_date: str = None,
     end_date: str = None,
     company_ids: str = None,
+    authorization: str = Header(None),
 ):
     """KPI data for home page. Pulls live data from connected companies.
-    
+
     period: last_month (default), ytd_last_month, custom
     start_date/end_date: required when period=custom (YYYY-MM-DD)
     company_ids: comma-separated company UUIDs to filter (omit for all)
     """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
     db = get_db()
-    company_count = db.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
+    company_count = db.execute("SELECT COUNT(*) FROM companies WHERE org_id = ?", (org_id,)).fetchone()[0]
     connected = db.execute(
-        "SELECT id, name FROM companies WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != ''"
+        "SELECT id, name FROM companies WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != '' AND org_id = ?",
+        (org_id,),
     ).fetchall()
     db.close()
 
