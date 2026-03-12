@@ -239,6 +239,18 @@ def init_db():
             description TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS knowledge_base (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'general',
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            sort_order INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (org_id) REFERENCES organizations(id)
+        );
         CREATE TABLE IF NOT EXISTS oauth_states (
             state TEXT PRIMARY KEY,
             redirect_uri TEXT,
@@ -331,6 +343,9 @@ def init_db():
 
     # Seed from cached JSON if available
     _seed_from_cached_files(db)
+
+    # Seed default knowledge base entries
+    _seed_knowledge_base(db)
     db.close()
 
 
@@ -394,6 +409,40 @@ def _seed_from_cached_files(db):
         elif isinstance(adata, list):
             accounts = adata
         _cache_accounts(db, cid, accounts)
+
+
+def _seed_knowledge_base(db):
+    """Seed default knowledge base entries for all orgs that don't have any yet."""
+    orgs = db.execute("SELECT id FROM organizations").fetchall()
+    for org in orgs:
+        oid = org["id"]
+        existing = db.execute("SELECT COUNT(*) as cnt FROM knowledge_base WHERE org_id = ?", (oid,)).fetchone()
+        if existing["cnt"] > 0:
+            continue
+        defaults = [
+            ("app_guide", "How to connect a QuickBooks company",
+             "1. Go to the Companies page\n2. Click 'Connect New Company'\n3. Sign in with your QuickBooks credentials\n4. Authorize access\n5. The company will appear in your list as 'Connected'"),
+            ("app_guide", "How to create an intercompany journal entry",
+             "1. Go to the Intercompany page\n2. Click 'New Entry'\n3. Select the source company and destination company\n4. Choose the entry type (e.g., Management Fee, Loan, Expense Reimbursement)\n5. Add line items with accounts and amounts — debits must equal credits on each side\n6. Click 'Create Entry' to save as pending, or 'Post to QBO' to push to QuickBooks"),
+            ("app_guide", "How to run financial reports",
+             "1. Go to the Dashboard or Reports section\n2. Select the report type: Profit & Loss, Balance Sheet, or Cash Flow\n3. Choose the date range (Last Month, Year to Date, or Custom)\n4. View consolidated totals across all companies, or click a company column to drill down\n5. Click any dollar amount to see the transaction detail behind that number"),
+            ("app_guide", "How to manage users",
+             "1. Go to the Users page (admin only)\n2. Click 'Add User' and enter their email and name\n3. Assign a role: Admin (full access) or Viewer (read-only)\n4. Assign which companies they can access\n5. They will receive a login with the credentials you set"),
+            ("app_guide", "How to use the AI chat assistant",
+             "Click the chat icon in the bottom-right corner. You can ask the AI to:\n- Create intercompany journal entries (just describe what you need in plain English)\n- Pull financial reports for any company or date range\n- Analyze financial data and compare companies\n- Navigate to any page in the app\n\nThe AI knows your connected companies and chart of accounts."),
+            ("accounting_rules", "Management Fee entries",
+             "Management fees are charged from the parent company (Sweet Hut Group LLC) to subsidiary locations. Typical entry:\n- Source (subsidiary): Debit Management Fee Expense, Credit Due to Parent/Accounts Payable\n- Destination (parent): Debit Due from Subsidiary/Accounts Receivable, Credit Management Fee Income"),
+            ("accounting_rules", "Intercompany loan entries",
+             "Loans between related companies should be recorded as:\n- Lending company: Debit Due from [Borrower] (or Intercompany Receivable), Credit Cash/Bank\n- Borrowing company: Debit Cash/Bank, Credit Due to [Lender] (or Intercompany Payable)\n\nMake sure both sides balance and use consistent account names."),
+            ("accounting_rules", "Expense reimbursement entries",
+             "When one company pays an expense on behalf of another:\n- Paying company: Debit Due from [Other Company], Credit Cash/Bank\n- Benefiting company: Debit the actual Expense account, Credit Due to [Paying Company]"),
+        ]
+        for i, (cat, title, content) in enumerate(defaults):
+            db.execute(
+                "INSERT INTO knowledge_base (id, org_id, category, title, content, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(uuid.uuid4()), oid, cat, title, content, i),
+            )
+        db.commit()
 
 
 def _upsert_company_from_info(db, cid, info, status, realm_id=None,
@@ -3105,6 +3154,109 @@ async def stripe_webhook(request: Request):
 
 
 # =====================================================================
+#  KNOWLEDGE BASE
+# =====================================================================
+
+class KBEntryCreate(BaseModel):
+    category: str = "general"
+    title: str
+    content: str
+    enabled: bool = True
+    sort_order: int = 0
+
+class KBEntryUpdate(BaseModel):
+    category: Optional[str] = None
+    title: Optional[str] = None
+    content: Optional[str] = None
+    enabled: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+@app.get("/api/knowledge-base")
+async def list_kb_entries(authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM knowledge_base WHERE org_id = ? ORDER BY category, sort_order, title",
+        (org_id,),
+    ).fetchall()
+    db.close()
+    return [{**dict(r), "enabled": bool(r["enabled"])} for r in rows]
+
+
+@app.post("/api/knowledge-base")
+async def create_kb_entry(req: KBEntryCreate, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    if user["role"] not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    org_id = get_org_id(user)
+    entry_id = str(uuid.uuid4())
+    db = get_db()
+    db.execute(
+        """INSERT INTO knowledge_base (id, org_id, category, title, content, enabled, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (entry_id, org_id, req.category, req.title, req.content, int(req.enabled), req.sort_order),
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM knowledge_base WHERE id = ?", (entry_id,)).fetchone()
+    db.close()
+    return {**dict(row), "enabled": bool(row["enabled"])}
+
+
+@app.put("/api/knowledge-base/{entry_id}")
+async def update_kb_entry(entry_id: str, req: KBEntryUpdate, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    if user["role"] not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    org_id = get_org_id(user)
+    db = get_db()
+    existing = db.execute("SELECT * FROM knowledge_base WHERE id = ? AND org_id = ?", (entry_id, org_id)).fetchone()
+    if not existing:
+        db.close()
+        raise HTTPException(status_code=404, detail="Entry not found")
+    updates = []
+    params = []
+    for field in ["category", "title", "content", "enabled", "sort_order"]:
+        val = getattr(req, field)
+        if val is not None:
+            if field == "enabled":
+                val = int(val)
+            updates.append(f"{field} = ?")
+            params.append(val)
+    if updates:
+        updates.append("updated_at = datetime('now')")
+        params.append(entry_id)
+        params.append(org_id)
+        db.execute(f"UPDATE knowledge_base SET {', '.join(updates)} WHERE id = ? AND org_id = ?", params)
+        db.commit()
+    row = db.execute("SELECT * FROM knowledge_base WHERE id = ?", (entry_id,)).fetchone()
+    db.close()
+    return {**dict(row), "enabled": bool(row["enabled"])}
+
+
+@app.delete("/api/knowledge-base/{entry_id}")
+async def delete_kb_entry(entry_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    if user["role"] not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    org_id = get_org_id(user)
+    db = get_db()
+    existing = db.execute("SELECT id FROM knowledge_base WHERE id = ? AND org_id = ?", (entry_id, org_id)).fetchone()
+    if not existing:
+        db.close()
+        raise HTTPException(status_code=404, detail="Entry not found")
+    db.execute("DELETE FROM knowledge_base WHERE id = ? AND org_id = ?", (entry_id, org_id))
+    db.commit()
+    db.close()
+    return {"status": "deleted"}
+
+
+# =====================================================================
 #  AI CHAT ASSISTANT
 # =====================================================================
 
@@ -3126,6 +3278,30 @@ def _build_company_context(org_id: str) -> str:
     for c in companies:
         lines.append(f"- {c['name']} (id: {c['id']}, status: {c['status']})")
     return "Connected companies:\n" + "\n".join(lines)
+
+
+def _build_kb_context(org_id: str) -> str:
+    """Build knowledge base context for the AI chat."""
+    db = get_db()
+    entries = db.execute(
+        """SELECT category, title, content FROM knowledge_base
+           WHERE org_id = ? AND enabled = 1
+           ORDER BY category, sort_order, title
+           LIMIT 50""",
+        (org_id,),
+    ).fetchall()
+    db.close()
+    if not entries:
+        return ""
+    lines = []
+    current_cat = ""
+    for e in entries:
+        cat_label = e["category"].replace("_", " ").title()
+        if cat_label != current_cat:
+            current_cat = cat_label
+            lines.append(f"\n## {current_cat}")
+        lines.append(f"### {e['title']}\n{e['content']}")
+    return "Knowledge Base:\n" + "\n".join(lines)
 
 
 def _build_accounts_context(org_id: str) -> str:
@@ -3173,7 +3349,7 @@ When the user asks for a report, respond with:
 
 When the user asks to navigate somewhere:
 ```action:navigate
-{{"page": "dashboard|companies|intercompany|account-mapping|users|billing"}}
+{{"page": "dashboard|companies|intercompany|account-mapping|users|billing|knowledge-base"}}
 ```
 
 Always be concise and helpful. Use the company and account context below to resolve company names to IDs.
@@ -3183,7 +3359,9 @@ Today's date: {today}.
 
 {company_context}
 
-{accounts_context}"""
+{accounts_context}
+
+{kb_context}"""
 
 
 @app.post("/api/chat")
@@ -3200,12 +3378,14 @@ async def chat(req: ChatMessage, authorization: str = Header(None)):
         # Build context
         company_context = _build_company_context(org_id)
         accounts_context = _build_accounts_context(org_id)
+        kb_context = _build_kb_context(org_id)
         today = datetime.now().strftime("%Y-%m-%d")
 
         system_msg = CHAT_SYSTEM_PROMPT.format(
             today=today,
             company_context=company_context,
             accounts_context=accounts_context,
+            kb_context=kb_context,
         )
 
         # Build Gemini contents array
