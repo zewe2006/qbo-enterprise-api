@@ -48,8 +48,8 @@ from typing import List, Optional
 
 # ---------- AI Chat Config ----------
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-AI_MODEL = os.environ.get("AI_MODEL", "gpt-4o-mini")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+AI_MODEL = os.environ.get("AI_MODEL", "gemini-2.0-flash")
 
 # ---------- Stripe Config ----------
 
@@ -3188,9 +3188,9 @@ Today's date: {today}.
 
 @app.post("/api/chat")
 async def chat(req: ChatMessage, authorization: str = Header(None)):
-    """AI chat endpoint — processes user messages with LLM."""
-    if not OPENAI_API_KEY:
-        raise HTTPException(status_code=500, detail="AI chat is not configured. Set OPENAI_API_KEY on Railway.")
+    """AI chat endpoint — processes user messages with Google Gemini."""
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="AI chat is not configured. Set GEMINI_API_KEY on Railway.")
 
     token = _extract_token(authorization)
     user = get_current_user(token)
@@ -3207,35 +3207,41 @@ async def chat(req: ChatMessage, authorization: str = Header(None)):
         accounts_context=accounts_context,
     )
 
-    # Build messages
-    messages = [{"role": "system", "content": system_msg}]
+    # Build Gemini contents array
+    contents = []
     if req.conversation:
-        for msg in req.conversation[-10:]:  # keep last 10 messages for context
-            messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-    messages.append({"role": "user", "content": req.message})
+        for msg in req.conversation[-10:]:
+            role = "model" if msg.get("role") == "assistant" else "user"
+            contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
+    contents.append({"role": "user", "parts": [{"text": req.message}]})
 
-    # Call OpenAI
+    # Call Google Gemini API
+    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{AI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
+            gemini_url,
+            headers={"Content-Type": "application/json"},
             json={
-                "model": AI_MODEL,
-                "messages": messages,
-                "temperature": 0.3,
-                "max_tokens": 2000,
+                "system_instruction": {"parts": [{"text": system_msg}]},
+                "contents": contents,
+                "generationConfig": {
+                    "temperature": 0.3,
+                    "maxOutputTokens": 2000,
+                },
             },
         )
 
     if resp.status_code != 200:
-        logger.error("OpenAI API error: %s %s", resp.status_code, resp.text[:300])
+        logger.error("Gemini API error: %s %s", resp.status_code, resp.text[:300])
         raise HTTPException(status_code=502, detail="AI service error. Please try again.")
 
     data = resp.json()
-    reply = data["choices"][0]["message"]["content"]
+    try:
+        reply = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError):
+        logger.error("Gemini unexpected response: %s", json.dumps(data)[:500])
+        raise HTTPException(status_code=502, detail="AI returned an unexpected response.")
 
     return {"reply": reply}
 
