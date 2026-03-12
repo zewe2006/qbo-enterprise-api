@@ -706,7 +706,7 @@ def get_current_user(token: str):
     db.close()
     u = dict(user)
     u["company_ids"] = [r["company_id"] for r in access_rows]
-    u["org_id"] = user.get("org_id", "")
+    u["org_id"] = u.get("org_id", "")
     u["org_name"] = org["name"] if org else ""
     return u
 
@@ -750,7 +750,7 @@ async def login(req: LoginRequest):
             "id": user["id"], "email": user["email"], "name": user["name"],
             "role": user["role"],
             "company_ids": [r["company_id"] for r in access_rows],
-            "org_id": user.get("org_id", ""), "org_name": org["name"] if org else "",
+            "org_id": user["org_id"] if user["org_id"] else "", "org_name": org["name"] if org else "",
         },
     }
 
