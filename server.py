@@ -46,6 +46,11 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List, Optional
 
+# ---------- AI Chat Config ----------
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+AI_MODEL = os.environ.get("AI_MODEL", "gpt-4o-mini")
+
 # ---------- Stripe Config ----------
 
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
@@ -3097,6 +3102,142 @@ async def stripe_webhook(request: Request):
         db.close()
 
     return {"status": "ok"}
+
+
+# =====================================================================
+#  AI CHAT ASSISTANT
+# =====================================================================
+
+class ChatMessage(BaseModel):
+    message: str
+    conversation: Optional[list] = None  # previous messages [{role, content}]
+
+
+def _build_company_context(org_id: str) -> str:
+    """Build a context string with all companies for this org."""
+    db = get_db()
+    companies = db.execute(
+        "SELECT id, name, status FROM companies WHERE org_id = ? ORDER BY name", (org_id,)
+    ).fetchall()
+    db.close()
+    if not companies:
+        return "No companies connected yet."
+    lines = []
+    for c in companies:
+        lines.append(f"- {c['name']} (id: {c['id']}, status: {c['status']})")
+    return "Connected companies:\n" + "\n".join(lines)
+
+
+def _build_accounts_context(org_id: str) -> str:
+    """Build cached accounts list for context."""
+    db = get_db()
+    accounts = db.execute(
+        """SELECT ca.account_name, ca.account_type, c.name as company_name
+           FROM company_accounts ca
+           JOIN companies c ON ca.company_id = c.id
+           WHERE c.org_id = ?
+           ORDER BY c.name, ca.account_type, ca.account_name
+           LIMIT 200""",
+        (org_id,),
+    ).fetchall()
+    db.close()
+    if not accounts:
+        return "No chart of accounts data cached yet."
+    lines = []
+    current_company = ""
+    for a in accounts:
+        if a["company_name"] != current_company:
+            current_company = a["company_name"]
+            lines.append(f"\n{current_company}:")
+        lines.append(f"  - {a['account_name']} ({a['account_type']})")
+    return "Chart of Accounts (sample):\n" + "\n".join(lines)
+
+
+CHAT_SYSTEM_PROMPT = """You are the AI assistant for Consolidated Report, a multi-company QuickBooks Online reporting dashboard.
+
+You help users with:
+1. **Creating intercompany journal entries** — Ask for source company, destination company, entry type, amount, accounts, and date. Then provide the structured JSON to create it.
+2. **Pulling financial reports** — P&L, Balance Sheet, Cash Flow for specific companies or consolidated across all.
+3. **Analyzing financial data** — Compare companies, identify trends, answer questions about revenue, expenses, etc.
+4. **App navigation and help** — Guide users on how to use features.
+
+When the user asks to create a journal entry, gather the necessary info and respond with a special JSON block that the frontend will parse:
+```action:create_je
+{"source_company_id": "...", "dest_company_id": "...", "entry_type": "...", "description": "...", "date": "YYYY-MM-DD", "amount": 0, "lines": [{"side": "source", "posting_type": "Debit", "account_name": "...", "amount": 0}, ...]}
+```
+
+When the user asks for a report, respond with:
+```action:show_report
+{"report_type": "profit-loss|balance-sheet|cash-flow", "company_id": "all|<specific-id>", "period": "last_month|ytd|custom", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}
+```
+
+When the user asks to navigate somewhere:
+```action:navigate
+{"page": "dashboard|companies|intercompany|account-mapping|users|billing"}
+```
+
+Always be concise and helpful. Use the company and account context below to resolve company names to IDs.
+For journal entries, each side (source and dest) must balance: total debits = total credits on that side.
+Common entry types: Management Fee, Loan, Expense Reimbursement, Revenue Transfer, Cost Allocation.
+Today's date: {today}.
+
+{company_context}
+
+{accounts_context}"""
+
+
+@app.post("/api/chat")
+async def chat(req: ChatMessage, authorization: str = Header(None)):
+    """AI chat endpoint — processes user messages with LLM."""
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="AI chat is not configured. Set OPENAI_API_KEY on Railway.")
+
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+
+    # Build context
+    company_context = _build_company_context(org_id)
+    accounts_context = _build_accounts_context(org_id)
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    system_msg = CHAT_SYSTEM_PROMPT.format(
+        today=today,
+        company_context=company_context,
+        accounts_context=accounts_context,
+    )
+
+    # Build messages
+    messages = [{"role": "system", "content": system_msg}]
+    if req.conversation:
+        for msg in req.conversation[-10:]:  # keep last 10 messages for context
+            messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+    messages.append({"role": "user", "content": req.message})
+
+    # Call OpenAI
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": AI_MODEL,
+                "messages": messages,
+                "temperature": 0.3,
+                "max_tokens": 2000,
+            },
+        )
+
+    if resp.status_code != 200:
+        logger.error("OpenAI API error: %s %s", resp.status_code, resp.text[:300])
+        raise HTTPException(status_code=502, detail="AI service error. Please try again.")
+
+    data = resp.json()
+    reply = data["choices"][0]["message"]["content"]
+
+    return {"reply": reply}
 
 
 # =====================================================================
