@@ -697,8 +697,32 @@ async def login(req: LoginRequest):
 
 @app.post("/api/auth/register")
 async def register(req: RegisterRequest):
-    # Self-registration disabled — admin-only
-    raise HTTPException(status_code=403, detail="Self-registration is disabled. Contact an admin.")
+    if not req.email or not req.password or not req.name:
+        raise HTTPException(status_code=400, detail="Email, password, and name are required.")
+    if len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+    email = req.email.strip().lower()
+    db = get_db()
+    existing = db.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+    if existing:
+        db.close()
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+    user_id = str(uuid.uuid4())
+    pw_hash = hashlib.sha256(req.password.encode()).hexdigest()
+    # New sign-ups get "viewer" role with no company access until admin assigns
+    db.execute(
+        "INSERT INTO users (id, email, password_hash, name, role) VALUES (?, ?, ?, ?, ?)",
+        (user_id, email, pw_hash, req.name.strip(), "viewer"),
+    )
+    db.commit()
+    db.close()
+    # Auto-login: generate token
+    token = str(uuid.uuid4())
+    active_tokens[token] = {"user_id": user_id, "email": email, "ts": __import__("time").time()}
+    return {
+        "token": token,
+        "user": {"id": user_id, "email": email, "name": req.name.strip(), "role": "viewer", "company_ids": []},
+    }
 
 @app.get("/api/auth/me")
 async def get_me(authorization: str = Header(None)):
