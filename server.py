@@ -81,7 +81,7 @@ QBO_REDIRECT_URI = os.environ.get(
 
 # Frontend origin for CORS — set to your Netlify URL
 FRONTEND_ORIGIN = os.environ.get(
-    "FRONTEND_ORIGIN", "https://consolidatedreport.netlify.app"
+    "FRONTEND_ORIGIN", "https://consolidatedreport.app"
 )
 
 # ---------- Database ----------
