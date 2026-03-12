@@ -3334,24 +3334,9 @@ CHAT_SYSTEM_PROMPT = """You are the AI assistant for Consolidated Report, a mult
 
 You help users with:
 1. **Creating intercompany journal entries** — Ask for source company, destination company, entry type, amount, accounts, and date. Then provide the structured JSON to create it.
-2. **Answering financial questions** — When users ask about revenue, expenses, net income, balances, etc., you MUST fetch the actual data and respond with real numbers.
+2. **Answering financial questions** — When users ask about revenue, expenses, net income, balances, etc., respond with real numbers from the financial data provided.
 3. **Analyzing financial data** — Compare companies, identify trends, break down expenses.
 4. **App navigation and help** — Guide users on how to use features.
-
-IMPORTANT: When the user asks ANY financial question (e.g. "what is my net income?", "how much revenue last month?", "what are my expenses?"), you MUST request the data using a fetch_data block. Do NOT just show a report button — answer with actual numbers.
-
-To fetch financial data, output this block:
-```action:fetch_data
-{{"report_type": "profit-loss|balance-sheet|cash-flow", "company_id": "all", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "by_company": true}}
-```
-- Use "all" for company_id to get consolidated + per-company breakdown
-- Use a specific company ID if the user asks about one company
-- Set by_company to true when the user asks about "all stores" or multiple companies
-- "last month" = the calendar month before the current month
-- "this month" = the current month to date
-- "ytd" = January 1 to today
-
-The system will fetch the data and call you again with the results. Then answer the question with the actual numbers.
 
 When the user asks to create a journal entry, gather the necessary info and respond with a special JSON block that the frontend will parse:
 ```action:create_je
@@ -3368,7 +3353,9 @@ When the user asks to navigate somewhere:
 {{"page": "dashboard|companies|intercompany|account-mapping|users|billing|knowledge-base"}}
 ```
 
-Always be concise and helpful. Format currency with dollar signs and commas. Use the company and account context below to resolve company names to IDs.
+Always be concise and helpful. Format currency with dollar signs and commas. When financial data is provided in the context, use those exact numbers to answer the question. Include per-company breakdowns when the data is available. After answering a financial question, you may optionally include an action:show_report block so the user can view the full report.
+
+Use the company and account context below to resolve company names to IDs.
 For journal entries, each side (source and dest) must balance: total debits = total credits on that side.
 Common entry types: Management Fee, Loan, Expense Reimbursement, Revenue Transfer, Cost Allocation.
 Today's date: {today}.
@@ -3377,7 +3364,9 @@ Today's date: {today}.
 
 {accounts_context}
 
-{kb_context}"""
+{kb_context}
+
+{financial_context}"""
 
 
 async def _call_gemini(system_msg: str, contents: list, max_tokens: int = 2000) -> str:
@@ -3512,11 +3501,77 @@ async def _chat_fetch_report_data(fetch_params: dict, org_id: str) -> str:
     return "\n".join(lines)
 
 
+# Financial question keywords for proactive data fetching
+_FINANCIAL_KEYWORDS = [
+    "net income", "revenue", "income", "expense", "profit", "loss",
+    "cogs", "cost of goods", "gross profit", "operating income",
+    "balance sheet", "assets", "liabilities", "equity",
+    "cash flow", "how much", "what is my", "what are my",
+    "total sales", "payroll", "rent", "utilities", "how did",
+    "compare", "breakdown", "which store", "which company",
+    "best performing", "worst performing", "highest", "lowest",
+]
+
+_PERIOD_PATTERNS = {
+    "last month": lambda now: (
+        f"{(now.year if now.month > 1 else now.year - 1)}-{((now.month - 1) or 12):02d}-01",
+        f"{(now.year if now.month > 1 else now.year - 1)}-{((now.month - 1) or 12):02d}-{calendar.monthrange(now.year if now.month > 1 else now.year - 1, (now.month - 1) or 12)[1]:02d}"
+    ),
+    "this month": lambda now: (
+        f"{now.year}-{now.month:02d}-01",
+        now.strftime("%Y-%m-%d")
+    ),
+    "year to date": lambda now: (
+        f"{now.year}-01-01",
+        now.strftime("%Y-%m-%d")
+    ),
+    "ytd": lambda now: (
+        f"{now.year}-01-01",
+        now.strftime("%Y-%m-%d")
+    ),
+}
+
+
+def _detect_financial_query(message: str) -> Optional[dict]:
+    """Detect if a message is asking a financial question and extract parameters.
+    Returns fetch params dict or None."""
+    msg_lower = message.lower()
+    is_financial = any(kw in msg_lower for kw in _FINANCIAL_KEYWORDS)
+    if not is_financial:
+        return None
+
+    now = datetime.now()
+    # Detect period
+    start_date, end_date = None, None
+    for pattern, date_fn in _PERIOD_PATTERNS.items():
+        if pattern in msg_lower:
+            start_date, end_date = date_fn(now)
+            break
+    if not start_date:
+        # Default to last month
+        start_date, end_date = _PERIOD_PATTERNS["last month"](now)
+
+    # Detect report type
+    report_type = "profit-loss"  # default
+    if "balance sheet" in msg_lower or "assets" in msg_lower or "liabilities" in msg_lower or "equity" in msg_lower:
+        report_type = "balance-sheet"
+    elif "cash flow" in msg_lower:
+        report_type = "cash-flow"
+
+    # Always fetch by_company for multi-store context
+    return {
+        "report_type": report_type,
+        "company_id": "all",
+        "start_date": start_date,
+        "end_date": end_date,
+        "by_company": True,
+    }
+
+
 @app.post("/api/chat")
 async def chat(req: ChatMessage, authorization: str = Header(None)):
     """AI chat endpoint — processes user messages with Google Gemini.
-    Supports a two-pass flow: if the AI requests data via action:fetch_data,
-    we fetch it internally and call the AI again with the actual numbers."""
+    Proactively fetches financial data when it detects financial questions."""
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="AI chat is not configured. Set GEMINI_API_KEY on Railway.")
 
@@ -3531,11 +3586,27 @@ async def chat(req: ChatMessage, authorization: str = Header(None)):
         kb_context = _build_kb_context(org_id)
         today = datetime.now().strftime("%Y-%m-%d")
 
+        # Proactively detect financial questions and fetch data
+        financial_context = ""
+        fetch_params = _detect_financial_query(req.message)
+        if fetch_params:
+            try:
+                logger.info("Chat: detected financial query, fetching data: %s", json.dumps(fetch_params))
+                report_data = await _chat_fetch_report_data(fetch_params, org_id)
+                if len(report_data) > 10000:
+                    report_data = report_data[:10000] + "\n... (truncated)"
+                financial_context = f"LIVE FINANCIAL DATA (use these numbers to answer):\n{report_data}"
+                logger.info("Chat: fetched financial data, %d chars", len(financial_context))
+            except Exception as e:
+                logger.warning("Chat: failed to fetch financial data: %s", str(e))
+                financial_context = "(Financial data could not be loaded. Suggest the user check the report page directly.)"
+
         system_msg = CHAT_SYSTEM_PROMPT.format(
             today=today,
             company_context=company_context,
             accounts_context=accounts_context,
             kb_context=kb_context,
+            financial_context=financial_context,
         )
 
         # Build Gemini contents array
@@ -3546,47 +3617,7 @@ async def chat(req: ChatMessage, authorization: str = Header(None)):
                 contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
         contents.append({"role": "user", "parts": [{"text": req.message}]})
 
-        # === PASS 1: Get AI response (may contain action:fetch_data) ===
-        reply = await _call_gemini(system_msg, contents)
-        logger.info("Chat Pass 1 reply (first 300 chars): %s", reply[:300])
-
-        # Check if the AI wants to fetch data
-        fetch_match = _re.search(r'```action:fetch_data\s*\n(.*?)```', reply, _re.DOTALL)
-        if fetch_match:
-            try:
-                fetch_params = json.loads(fetch_match.group(1).strip())
-                logger.info("Chat: AI requested data fetch: %s", json.dumps(fetch_params))
-
-                # Fetch the actual report data
-                report_data = await _chat_fetch_report_data(fetch_params, org_id)
-                logger.info("Chat: fetched report data, length=%d chars", len(report_data))
-
-                # Truncate if too large (keep under ~6000 chars for the data)
-                if len(report_data) > 8000:
-                    report_data = report_data[:8000] + "\n... (data truncated for brevity)"
-
-                # === PASS 2: Call AI again with JUST the data and original question ===
-                # Use a simplified system prompt and fresh contents to stay within token limits
-                pass2_system = """You are a financial assistant. The user asked a financial question and we fetched the data from QuickBooks Online. Answer the question using the data provided. Be specific with actual dollar amounts formatted with $ and commas. If per-company data is available, show a summary table or list. Be concise.
-
-After your answer, you may optionally include this block so the user can view the full report:
-```action:show_report
-{"report_type": "profit-loss", "company_id": "all", "period": "custom", "start_date": "START", "end_date": "END"}
-```"""
-                pass2_contents = [
-                    {"role": "user", "parts": [{"text": f"Original question: {req.message}\n\nHere is the financial data:\n\n{report_data}"}]},
-                ]
-
-                pass2_reply = await _call_gemini_safe(pass2_system, pass2_contents, max_tokens=4000)
-                if pass2_reply:
-                    reply = pass2_reply
-                else:
-                    # Fallback: build a basic answer from the data directly
-                    reply = f"Here is the data I found:\n\n{report_data}\n\n_(Note: I couldn't generate a formatted summary. The raw data is shown above.)_"
-            except (json.JSONDecodeError, Exception) as e:
-                logger.error("Chat fetch_data error: %s", str(e), exc_info=True)
-                # Fall back to the original reply if data fetch fails
-                reply = reply.replace(fetch_match.group(0), "_(I tried to look up the data but encountered an error. Please check the report directly.)_")
+        reply = await _call_gemini(system_msg, contents, max_tokens=4000 if financial_context else 2000)
 
         return {"reply": reply}
 
