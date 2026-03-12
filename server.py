@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""EnterpriseLedger — Backend API Server.
-Consolidated Reporting for QuickBooks.
+"""Consolidated Report — Backend API Server.
+Multi-Company Reporting for QuickBooks.
 
 Architecture:
 - Direct QuickBooks Online API integration via OAuth 2.0.
@@ -37,7 +37,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger("enterpriseledger")
+logger = logging.getLogger("consolidatedreport")
 
 import httpx
 from fastapi import FastAPI, HTTPException, Header, Request
@@ -631,13 +631,13 @@ async def qbo_get_company_info(db, company_id_db: str, realm_id: str = None) -> 
 async def lifespan(app):
     init_db()
     logger.info(
-        "EnterpriseLedger started | env=%s | db=%s | volume=%s",
+        "Consolidated Report started | env=%s | db=%s | volume=%s",
         QBO_ENVIRONMENT, DB_PATH, bool(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")),
     )
     yield
-    logger.info("EnterpriseLedger shutting down")
+    logger.info("Consolidated Report shutting down")
 
-app = FastAPI(lifespan=lifespan, title="EnterpriseLedger API")
+app = FastAPI(lifespan=lifespan, title="Consolidated Report API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
