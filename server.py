@@ -3648,22 +3648,6 @@ def _detect_financial_query(message: str) -> Optional[dict]:
     }
 
 
-@app.get("/api/debug/parse-period")
-async def debug_parse_period(message: str = ""):
-    """Debug endpoint to test date parsing in production."""
-    msg_lower = message.lower()
-    now = datetime.now()
-    start_date, end_date = _parse_period(msg_lower, now)
-    fp = _detect_financial_query(message)
-    return {
-        "message": message,
-        "now": now.isoformat(),
-        "parsed_start": start_date,
-        "parsed_end": end_date,
-        "detect_result": fp,
-    }
-
-
 @app.post("/api/chat")
 async def chat(req: ChatMessage, authorization: str = Header(None)):
     """AI chat endpoint — processes user messages with Google Gemini.
