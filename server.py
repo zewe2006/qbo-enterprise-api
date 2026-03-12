@@ -3163,17 +3163,17 @@ You help users with:
 
 When the user asks to create a journal entry, gather the necessary info and respond with a special JSON block that the frontend will parse:
 ```action:create_je
-{"source_company_id": "...", "dest_company_id": "...", "entry_type": "...", "description": "...", "date": "YYYY-MM-DD", "amount": 0, "lines": [{"side": "source", "posting_type": "Debit", "account_name": "...", "amount": 0}, ...]}
+{{"source_company_id": "...", "dest_company_id": "...", "entry_type": "...", "description": "...", "date": "YYYY-MM-DD", "amount": 0, "lines": [{{"side": "source", "posting_type": "Debit", "account_name": "...", "amount": 0}}, ...]}}
 ```
 
 When the user asks for a report, respond with:
 ```action:show_report
-{"report_type": "profit-loss|balance-sheet|cash-flow", "company_id": "all|<specific-id>", "period": "last_month|ytd|custom", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}
+{{"report_type": "profit-loss|balance-sheet|cash-flow", "company_id": "all|<specific-id>", "period": "last_month|ytd|custom", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}}
 ```
 
 When the user asks to navigate somewhere:
 ```action:navigate
-{"page": "dashboard|companies|intercompany|account-mapping|users|billing"}
+{{"page": "dashboard|companies|intercompany|account-mapping|users|billing"}}
 ```
 
 Always be concise and helpful. Use the company and account context below to resolve company names to IDs.
@@ -3192,58 +3192,65 @@ async def chat(req: ChatMessage, authorization: str = Header(None)):
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="AI chat is not configured. Set GEMINI_API_KEY on Railway.")
 
-    token = _extract_token(authorization)
-    user = get_current_user(token)
-    org_id = get_org_id(user)
+    try:
+        token = _extract_token(authorization)
+        user = get_current_user(token)
+        org_id = get_org_id(user)
 
-    # Build context
-    company_context = _build_company_context(org_id)
-    accounts_context = _build_accounts_context(org_id)
-    today = datetime.now().strftime("%Y-%m-%d")
+        # Build context
+        company_context = _build_company_context(org_id)
+        accounts_context = _build_accounts_context(org_id)
+        today = datetime.now().strftime("%Y-%m-%d")
 
-    system_msg = CHAT_SYSTEM_PROMPT.format(
-        today=today,
-        company_context=company_context,
-        accounts_context=accounts_context,
-    )
-
-    # Build Gemini contents array
-    contents = []
-    if req.conversation:
-        for msg in req.conversation[-10:]:
-            role = "model" if msg.get("role") == "assistant" else "user"
-            contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
-    contents.append({"role": "user", "parts": [{"text": req.message}]})
-
-    # Call Google Gemini API
-    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{AI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            gemini_url,
-            headers={"Content-Type": "application/json"},
-            json={
-                "system_instruction": {"parts": [{"text": system_msg}]},
-                "contents": contents,
-                "generationConfig": {
-                    "temperature": 0.3,
-                    "maxOutputTokens": 2000,
-                },
-            },
+        system_msg = CHAT_SYSTEM_PROMPT.format(
+            today=today,
+            company_context=company_context,
+            accounts_context=accounts_context,
         )
 
-    if resp.status_code != 200:
-        logger.error("Gemini API error: %s %s", resp.status_code, resp.text[:300])
-        raise HTTPException(status_code=502, detail="AI service error. Please try again.")
+        # Build Gemini contents array
+        contents = []
+        if req.conversation:
+            for msg in req.conversation[-10:]:
+                role = "model" if msg.get("role") == "assistant" else "user"
+                contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
+        contents.append({"role": "user", "parts": [{"text": req.message}]})
 
-    data = resp.json()
-    try:
-        reply = data["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError):
-        logger.error("Gemini unexpected response: %s", json.dumps(data)[:500])
-        raise HTTPException(status_code=502, detail="AI returned an unexpected response.")
+        # Call Google Gemini API
+        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{AI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
-    return {"reply": reply}
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                gemini_url,
+                headers={"Content-Type": "application/json"},
+                json={
+                    "system_instruction": {"parts": [{"text": system_msg}]},
+                    "contents": contents,
+                    "generationConfig": {
+                        "temperature": 0.3,
+                        "maxOutputTokens": 2000,
+                    },
+                },
+            )
+
+        if resp.status_code != 200:
+            logger.error("Gemini API error: %s %s", resp.status_code, resp.text[:300])
+            raise HTTPException(status_code=502, detail="AI service error. Please try again.")
+
+        data = resp.json()
+        try:
+            reply = data["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError):
+            logger.error("Gemini unexpected response: %s", json.dumps(data)[:500])
+            raise HTTPException(status_code=502, detail="AI returned an unexpected response.")
+
+        return {"reply": reply}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Chat endpoint error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
 
 # =====================================================================
