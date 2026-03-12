@@ -714,11 +714,11 @@ async def register(req: RegisterRequest):
         "INSERT INTO users (id, email, password_hash, name, role) VALUES (?, ?, ?, ?, ?)",
         (user_id, email, pw_hash, req.name.strip(), "viewer"),
     )
+    # Auto-login: generate session token
+    token = str(uuid.uuid4())
+    db.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
     db.commit()
     db.close()
-    # Auto-login: generate token
-    token = str(uuid.uuid4())
-    active_tokens[token] = {"user_id": user_id, "email": email, "ts": __import__("time").time()}
     return {
         "token": token,
         "user": {"id": user_id, "email": email, "name": req.name.strip(), "role": "viewer", "company_ids": []},
