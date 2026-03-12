@@ -3270,6 +3270,32 @@ async def health():
     }
 
 
+@app.get("/api/test-gemini")
+async def test_gemini():
+    """Quick test of Gemini API connectivity."""
+    if not GEMINI_API_KEY:
+        return {"status": "error", "detail": "GEMINI_API_KEY not set", "key_length": 0}
+    try:
+        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{AI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                gemini_url,
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{"role": "user", "parts": [{"text": "Say hello in one word."}]}],
+                    "generationConfig": {"maxOutputTokens": 10},
+                },
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            reply = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            return {"status": "ok", "model": AI_MODEL, "reply": reply, "key_length": len(GEMINI_API_KEY)}
+        else:
+            return {"status": "error", "http_code": resp.status_code, "detail": resp.text[:500], "model": AI_MODEL, "key_length": len(GEMINI_API_KEY)}
+    except Exception as e:
+        return {"status": "error", "detail": str(e), "key_length": len(GEMINI_API_KEY)}
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
