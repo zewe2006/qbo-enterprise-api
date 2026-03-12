@@ -3398,11 +3398,43 @@ async def _call_gemini(system_msg: str, contents: list, max_tokens: int = 2000) 
         raise HTTPException(status_code=502, detail=f"AI response was blocked ({block_reason}). Please try rephrasing.")
     candidate = candidates[0]
     finish_reason = candidate.get("finishReason", "")
+    # Try to extract text from any part
+    parts = candidate.get("content", {}).get("parts", [])
+    text_parts = []
+    for part in parts:
+        if "text" in part:
+            text_parts.append(part["text"])
+        elif "functionCall" in part:
+            # Model tried to make a function call — log it and continue
+            fc = part["functionCall"]
+            logger.warning("Gemini made unexpected function call: %s(%s)", fc.get("name"), json.dumps(fc.get("args", {}))[:200])
+    if text_parts:
+        return "\n".join(text_parts)
+    # If no text at all
+    logger.error("Gemini no text parts (finishReason=%s): %s", finish_reason, json.dumps(data)[:1000])
+    raise HTTPException(status_code=502, detail=f"AI returned an unexpected response (reason: {finish_reason}).")
+
+
+async def _call_gemini_with_retry(system_msg: str, contents: list, max_tokens: int = 2000) -> str:
+    """Call Gemini with a retry on UNEXPECTED_TOOL_CALL errors."""
     try:
-        return candidate["content"]["parts"][0]["text"]
-    except (KeyError, IndexError):
-        logger.error("Gemini unexpected response (finishReason=%s): %s", finish_reason, json.dumps(data)[:1000])
-        raise HTTPException(status_code=502, detail=f"AI returned an unexpected response (reason: {finish_reason}).")
+        return await _call_gemini(system_msg, contents, max_tokens)
+    except HTTPException as e:
+        if "UNEXPECTED_TOOL_CALL" in str(e.detail):
+            # Retry with a prefixed instruction to avoid function calling
+            logger.info("Retrying Gemini call with anti-tool-call prefix")
+            modified_contents = list(contents)
+            # Prefix the user message with an explicit instruction
+            if modified_contents:
+                last = modified_contents[-1]
+                if last.get("role") == "user" and last.get("parts"):
+                    original_text = last["parts"][0].get("text", "")
+                    modified_contents[-1] = {
+                        "role": "user",
+                        "parts": [{"text": f"(Important: respond only with plain text, do not call any functions or tools.)\n\n{original_text}"}]
+                    }
+            return await _call_gemini(system_msg, modified_contents, max_tokens)
+        raise
 
 
 async def _call_gemini_safe(system_msg: str, contents: list, max_tokens: int = 2000) -> str:
@@ -3617,7 +3649,7 @@ async def chat(req: ChatMessage, authorization: str = Header(None)):
                 contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
         contents.append({"role": "user", "parts": [{"text": req.message}]})
 
-        reply = await _call_gemini(system_msg, contents, max_tokens=4000 if financial_context else 2000)
+        reply = await _call_gemini_with_retry(system_msg, contents, max_tokens=4000 if financial_context else 2000)
 
         return {"reply": reply}
 
