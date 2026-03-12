@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import re as _re
 import secrets
 import sqlite3
 import uuid
@@ -3333,16 +3334,31 @@ CHAT_SYSTEM_PROMPT = """You are the AI assistant for Consolidated Report, a mult
 
 You help users with:
 1. **Creating intercompany journal entries** — Ask for source company, destination company, entry type, amount, accounts, and date. Then provide the structured JSON to create it.
-2. **Pulling financial reports** — P&L, Balance Sheet, Cash Flow for specific companies or consolidated across all.
-3. **Analyzing financial data** — Compare companies, identify trends, answer questions about revenue, expenses, etc.
+2. **Answering financial questions** — When users ask about revenue, expenses, net income, balances, etc., you MUST fetch the actual data and respond with real numbers.
+3. **Analyzing financial data** — Compare companies, identify trends, break down expenses.
 4. **App navigation and help** — Guide users on how to use features.
+
+IMPORTANT: When the user asks ANY financial question (e.g. "what is my net income?", "how much revenue last month?", "what are my expenses?"), you MUST request the data using a fetch_data block. Do NOT just show a report button — answer with actual numbers.
+
+To fetch financial data, output this block:
+```action:fetch_data
+{{"report_type": "profit-loss|balance-sheet|cash-flow", "company_id": "all", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "by_company": true}}
+```
+- Use "all" for company_id to get consolidated + per-company breakdown
+- Use a specific company ID if the user asks about one company
+- Set by_company to true when the user asks about "all stores" or multiple companies
+- "last month" = the calendar month before the current month
+- "this month" = the current month to date
+- "ytd" = January 1 to today
+
+The system will fetch the data and call you again with the results. Then answer the question with the actual numbers.
 
 When the user asks to create a journal entry, gather the necessary info and respond with a special JSON block that the frontend will parse:
 ```action:create_je
 {{"source_company_id": "...", "dest_company_id": "...", "entry_type": "...", "description": "...", "date": "YYYY-MM-DD", "amount": 0, "lines": [{{"side": "source", "posting_type": "Debit", "account_name": "...", "amount": 0}}, ...]}}
 ```
 
-When the user asks for a report, respond with:
+When the user asks to SEE/VIEW/OPEN a report (not asking a question about data), respond with:
 ```action:show_report
 {{"report_type": "profit-loss|balance-sheet|cash-flow", "company_id": "all|<specific-id>", "period": "last_month|ytd|custom", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}}
 ```
@@ -3352,7 +3368,7 @@ When the user asks to navigate somewhere:
 {{"page": "dashboard|companies|intercompany|account-mapping|users|billing|knowledge-base"}}
 ```
 
-Always be concise and helpful. Use the company and account context below to resolve company names to IDs.
+Always be concise and helpful. Format currency with dollar signs and commas. Use the company and account context below to resolve company names to IDs.
 For journal entries, each side (source and dest) must balance: total debits = total credits on that side.
 Common entry types: Management Fee, Loan, Expense Reimbursement, Revenue Transfer, Cost Allocation.
 Today's date: {today}.
@@ -3364,9 +3380,125 @@ Today's date: {today}.
 {kb_context}"""
 
 
+async def _call_gemini(system_msg: str, contents: list, max_tokens: int = 2000) -> str:
+    """Call Gemini API and return the text reply."""
+    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{AI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            gemini_url,
+            headers={"Content-Type": "application/json"},
+            json={
+                "system_instruction": {"parts": [{"text": system_msg}]},
+                "contents": contents,
+                "generationConfig": {
+                    "temperature": 0.3,
+                    "maxOutputTokens": max_tokens,
+                },
+            },
+        )
+    if resp.status_code != 200:
+        logger.error("Gemini API error: %s %s", resp.status_code, resp.text[:500])
+        raise HTTPException(status_code=502, detail="AI service error. Please try again.")
+    data = resp.json()
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError):
+        logger.error("Gemini unexpected response: %s", json.dumps(data)[:500])
+        raise HTTPException(status_code=502, detail="AI returned an unexpected response.")
+
+
+async def _chat_fetch_report_data(fetch_params: dict, org_id: str) -> str:
+    """Internally fetch report data for the AI chat and return a text summary."""
+    db = get_db()
+    report_type = fetch_params.get("report_type", "profit-loss")
+    company_id = fetch_params.get("company_id", "all")
+    start_date = fetch_params.get("start_date")
+    end_date = fetch_params.get("end_date")
+    by_company = fetch_params.get("by_company", False)
+
+    qbo_report_map = {
+        "profit-loss": "ProfitAndLoss",
+        "balance-sheet": "BalanceSheet",
+        "cash-flow": "CashFlow",
+    }
+    qbo_report_name = qbo_report_map.get(report_type, "ProfitAndLoss")
+
+    # Determine which companies to query
+    if company_id and company_id != "all":
+        companies = db.execute(
+            "SELECT id, name FROM companies WHERE id = ? AND org_id = ? AND status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != ''",
+            (company_id, org_id),
+        ).fetchall()
+    else:
+        companies = db.execute(
+            "SELECT id, name FROM companies WHERE org_id = ? AND status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != '' ORDER BY name",
+            (org_id,),
+        ).fetchall()
+    db.close()
+
+    if not companies:
+        return "No connected companies found."
+
+    # Fetch reports for each company
+    all_reports = []
+    per_company = {}  # name -> flat lookup
+    for company in companies:
+        try:
+            qbo_params = {"accounting_method": "Accrual"}
+            if start_date:
+                qbo_params["start_date"] = start_date
+            if end_date:
+                qbo_params["end_date"] = end_date
+            report = await qbo_get_report(get_db(), company["id"], qbo_report_name, qbo_params)
+            if _has_report_data(report):
+                all_reports.append(report)
+                if by_company:
+                    per_company[company["name"]] = _build_flat_lookup(report)
+        except Exception as e:
+            logger.warning("Chat fetch report error for %s: %s", company["name"], str(e))
+
+    if not all_reports:
+        return f"No {report_type} data available for the requested period ({start_date} to {end_date})."
+
+    # Build consolidated totals
+    consolidated = _merge_reports(all_reports)
+    consolidated_lookup = _build_flat_lookup(consolidated) if consolidated else {}
+
+    # Format the data as readable text for the AI
+    lines = []
+    lines.append(f"=== {report_type.upper()} DATA ({start_date} to {end_date}) ===")
+    lines.append(f"Accounting Method: Accrual")
+    lines.append(f"Companies included: {len(all_reports)}")
+    lines.append("")
+
+    # Consolidated totals
+    lines.append("--- CONSOLIDATED TOTALS ---")
+    for key in sorted(consolidated_lookup.keys()):
+        val = consolidated_lookup[key]
+        if val != 0:
+            lines.append(f"  {key}: ${val:,.2f}")
+
+    # Per-company breakdown
+    if by_company and per_company:
+        lines.append("")
+        lines.append("--- PER-COMPANY BREAKDOWN ---")
+        for cname in sorted(per_company.keys()):
+            lines.append(f"")
+            lines.append(f"  [{cname}]")
+            lookup = per_company[cname]
+            for key in sorted(lookup.keys()):
+                val = lookup[key]
+                if val != 0:
+                    lines.append(f"    {key}: ${val:,.2f}")
+
+    return "\n".join(lines)
+
+
 @app.post("/api/chat")
 async def chat(req: ChatMessage, authorization: str = Header(None)):
-    """AI chat endpoint — processes user messages with Google Gemini."""
+    """AI chat endpoint — processes user messages with Google Gemini.
+    Supports a two-pass flow: if the AI requests data via action:fetch_data,
+    we fetch it internally and call the AI again with the actual numbers."""
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="AI chat is not configured. Set GEMINI_API_KEY on Railway.")
 
@@ -3396,33 +3528,29 @@ async def chat(req: ChatMessage, authorization: str = Header(None)):
                 contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
         contents.append({"role": "user", "parts": [{"text": req.message}]})
 
-        # Call Google Gemini API
-        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{AI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        # === PASS 1: Get AI response (may contain action:fetch_data) ===
+        reply = await _call_gemini(system_msg, contents)
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                gemini_url,
-                headers={"Content-Type": "application/json"},
-                json={
-                    "system_instruction": {"parts": [{"text": system_msg}]},
-                    "contents": contents,
-                    "generationConfig": {
-                        "temperature": 0.3,
-                        "maxOutputTokens": 2000,
-                    },
-                },
-            )
+        # Check if the AI wants to fetch data
+        fetch_match = _re.search(r'```action:fetch_data\n(.*?)```', reply, _re.DOTALL)
+        if fetch_match:
+            try:
+                fetch_params = json.loads(fetch_match.group(1).strip())
+                logger.info("Chat: AI requested data fetch: %s", json.dumps(fetch_params))
 
-        if resp.status_code != 200:
-            logger.error("Gemini API error: %s %s", resp.status_code, resp.text[:500])
-            raise HTTPException(status_code=502, detail="AI service error. Please try again.")
+                # Fetch the actual report data
+                report_data = await _chat_fetch_report_data(fetch_params, org_id)
 
-        data = resp.json()
-        try:
-            reply = data["candidates"][0]["content"]["parts"][0]["text"]
-        except (KeyError, IndexError):
-            logger.error("Gemini unexpected response: %s", json.dumps(data)[:500])
-            raise HTTPException(status_code=502, detail="AI returned an unexpected response.")
+                # === PASS 2: Call AI again with the actual data ===
+                # Add the AI's first response and the data as context
+                contents.append({"role": "model", "parts": [{"text": reply}]})
+                contents.append({"role": "user", "parts": [{"text": f"Here is the financial data you requested:\n\n{report_data}\n\nNow answer the user's original question using this data. Be specific with actual dollar amounts. Format numbers with dollar signs and commas. If the user asked about all stores, show a per-company breakdown. After your answer, you may optionally include an action:show_report block so the user can view the full report."}]})
+
+                reply = await _call_gemini(system_msg, contents, max_tokens=4000)
+            except (json.JSONDecodeError, Exception) as e:
+                logger.error("Chat fetch_data error: %s", str(e), exc_info=True)
+                # Fall back to the original reply if data fetch fails
+                reply = reply.replace(fetch_match.group(0), "_(I tried to look up the data but encountered an error. Please check the report directly.)_")
 
         return {"reply": reply}
 
