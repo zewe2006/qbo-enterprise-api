@@ -3132,11 +3132,11 @@ def _build_accounts_context(org_id: str) -> str:
     """Build cached accounts list for context."""
     db = get_db()
     accounts = db.execute(
-        """SELECT ca.account_name, ca.account_type, c.name as company_name
+        """SELECT ca.name, ca.account_type, c.name as company_name
            FROM company_accounts ca
            JOIN companies c ON ca.company_id = c.id
-           WHERE c.org_id = ?
-           ORDER BY c.name, ca.account_type, ca.account_name
+           WHERE c.org_id = ? AND ca.active = 1
+           ORDER BY c.name, ca.account_type, ca.name
            LIMIT 200""",
         (org_id,),
     ).fetchall()
@@ -3149,7 +3149,7 @@ def _build_accounts_context(org_id: str) -> str:
         if a["company_name"] != current_company:
             current_company = a["company_name"]
             lines.append(f"\n{current_company}:")
-        lines.append(f"  - {a['account_name']} ({a['account_type']})")
+        lines.append(f"  - {a['name']} ({a['account_type']})")
     return "Chart of Accounts (sample):\n" + "\n".join(lines)
 
 
