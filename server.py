@@ -3394,6 +3394,7 @@ async def _call_gemini(system_msg: str, contents: list, max_tokens: int = 2000) 
                     "temperature": 0.3,
                     "maxOutputTokens": max_tokens,
                 },
+                "toolConfig": {"functionCallingConfig": {"mode": "NONE"}},
             },
         )
     if resp.status_code != 200:
