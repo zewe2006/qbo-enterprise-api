@@ -277,6 +277,7 @@ def init_db():
     _add_column_safe(db, "organizations", "stripe_subscription_id", "TEXT")
     _add_column_safe(db, "organizations", "subscription_status", "TEXT DEFAULT 'none'")  # none, active, past_due, canceled
     _add_column_safe(db, "organizations", "trial_ends_at", "TEXT")
+    _add_column_safe(db, "organizations", "trial_started_at", "TEXT")
 
     # Create default org for existing data if not exists
     existing_org = db.execute("SELECT id FROM organizations LIMIT 1").fetchone()
@@ -736,6 +737,74 @@ def get_org_id(user):
     return org_id
 
 
+def get_effective_plan(org_dict: dict) -> dict:
+    """Determine the effective plan for an org, accounting for trial status.
+    Returns dict with: plan, max_companies, trial_active, trial_days_remaining, trial_ends_at
+    """
+    plan = org_dict.get("plan", "free")
+    sub_status = org_dict.get("subscription_status", "none")
+    trial_ends_at = org_dict.get("trial_ends_at", "")
+    trial_started_at = org_dict.get("trial_started_at", "")
+
+    # If they have an active paid subscription, they're on Business
+    if plan == "business" and sub_status in ("active", "trialing"):
+        return {
+            "plan": "business",
+            "max_companies": 50,
+            "trial_active": False,
+            "trial_days_remaining": 0,
+            "trial_ends_at": "",
+        }
+
+    # Check if in-app trial is active
+    if trial_ends_at:
+        try:
+            trial_end = datetime.fromisoformat(trial_ends_at.replace("Z", "+00:00")) if "+" in trial_ends_at or "Z" in trial_ends_at else datetime.fromisoformat(trial_ends_at).replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            if now < trial_end:
+                days_left = (trial_end - now).days + 1  # round up
+                return {
+                    "plan": "business",
+                    "max_companies": 50,
+                    "trial_active": True,
+                    "trial_days_remaining": max(days_left, 1),
+                    "trial_ends_at": trial_ends_at,
+                }
+            else:
+                # Trial expired — ensure plan is downgraded
+                if plan != "free" and sub_status not in ("active", "trialing"):
+                    try:
+                        db = get_db()
+                        db.execute(
+                            "UPDATE organizations SET plan = 'free', max_companies = 3 WHERE id = ?",
+                            (org_dict.get("id"),),
+                        )
+                        db.commit()
+                        db.close()
+                    except Exception:
+                        pass
+                return {
+                    "plan": "free",
+                    "max_companies": 3,
+                    "trial_active": False,
+                    "trial_days_remaining": 0,
+                    "trial_ends_at": trial_ends_at,
+                    "trial_expired": True,
+                }
+
+        except (ValueError, TypeError):
+            pass
+
+    # Default: free plan
+    return {
+        "plan": plan if plan == "business" and sub_status in ("active",) else "free",
+        "max_companies": org_dict.get("max_companies", 3) if plan == "business" and sub_status in ("active",) else 3,
+        "trial_active": False,
+        "trial_days_remaining": 0,
+        "trial_ends_at": "",
+    }
+
+
 @app.post("/api/auth/login")
 async def login(req: LoginRequest):
     db = get_db()
@@ -754,8 +823,9 @@ async def login(req: LoginRequest):
     access_rows = db.execute(
         "SELECT company_id FROM user_company_access WHERE user_id = ?", (user["id"],)
     ).fetchall()
-    org = db.execute("SELECT name FROM organizations WHERE id = ?", (user["org_id"],)).fetchone() if user["org_id"] else None
+    org = db.execute("SELECT * FROM organizations WHERE id = ?", (user["org_id"],)).fetchone() if user["org_id"] else None
     db.close()
+    plan_info = get_effective_plan(dict(org)) if org else {}
     return {
         "token": token,
         "user": {
@@ -763,6 +833,11 @@ async def login(req: LoginRequest):
             "role": user["role"],
             "company_ids": [r["company_id"] for r in access_rows],
             "org_id": user["org_id"] if user["org_id"] else "", "org_name": org["name"] if org else "",
+            "plan": plan_info.get("plan", "free"),
+            "trial_active": plan_info.get("trial_active", False),
+            "trial_days_remaining": plan_info.get("trial_days_remaining", 0),
+            "trial_expired": plan_info.get("trial_expired", False),
+            "max_companies": plan_info.get("max_companies", 3),
         },
     }
 
@@ -786,10 +861,12 @@ async def register(req: RegisterRequest):
     if db.execute("SELECT id FROM organizations WHERE slug = ?", (org_slug,)).fetchone():
         org_slug = org_slug[:40] + "-" + secrets.token_hex(4)
     pw_hash = hashlib.sha256(req.password.encode()).hexdigest()
-    # Create organization
+    # Create organization with 14-day Business trial
+    trial_start = datetime.now(timezone.utc).isoformat()
+    trial_end = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat()
     db.execute(
-        "INSERT INTO organizations (id, name, slug, owner_id) VALUES (?, ?, ?, ?)",
-        (org_id, org_name, org_slug, user_id),
+        "INSERT INTO organizations (id, name, slug, owner_id, plan, max_companies, trial_started_at, trial_ends_at) VALUES (?, ?, ?, ?, 'business', 50, ?, ?)",
+        (org_id, org_name, org_slug, user_id, trial_start, trial_end),
     )
     # Create user as org admin
     db.execute(
@@ -803,17 +880,35 @@ async def register(req: RegisterRequest):
     db.close()
     return {
         "token": token,
-        "user": {"id": user_id, "email": email, "name": req.name.strip(), "role": "admin", "company_ids": [], "org_id": org_id, "org_name": org_name},
+        "user": {
+            "id": user_id, "email": email, "name": req.name.strip(), "role": "admin",
+            "company_ids": [], "org_id": org_id, "org_name": org_name,
+            "plan": "business", "trial_active": True, "trial_days_remaining": 14,
+            "trial_expired": False, "max_companies": 50,
+        },
     }
 
 @app.get("/api/auth/me")
 async def get_me(authorization: str = Header(None)):
     token = _extract_token(authorization)
     user = get_current_user(token)
+    # Include trial/plan info
+    plan_info = {}
+    if user.get("org_id"):
+        db = get_db()
+        org = db.execute("SELECT * FROM organizations WHERE id = ?", (user["org_id"],)).fetchone()
+        db.close()
+        if org:
+            plan_info = get_effective_plan(dict(org))
     return {
         "id": user["id"], "email": user["email"], "name": user["name"],
         "role": user["role"], "company_ids": user.get("company_ids", []),
         "org_id": user.get("org_id", ""), "org_name": user.get("org_name", ""),
+        "plan": plan_info.get("plan", "free"),
+        "trial_active": plan_info.get("trial_active", False),
+        "trial_days_remaining": plan_info.get("trial_days_remaining", 0),
+        "trial_expired": plan_info.get("trial_expired", False),
+        "max_companies": plan_info.get("max_companies", 3),
     }
 
 @app.post("/api/auth/logout")
@@ -1170,6 +1265,25 @@ async def qbo_callback(request: Request, code: str = None, state: str = None,
     if existing:
         cid = existing["id"]
     else:
+        # Enforce company limit for new companies
+        org = db.execute("SELECT * FROM organizations WHERE id = ?", (oauth_org_id,)).fetchone()
+        if org:
+            org_d = dict(org)
+            effective = get_effective_plan(org_d)
+            current_count = db.execute(
+                "SELECT COUNT(*) as cnt FROM companies WHERE org_id = ?", (oauth_org_id,)
+            ).fetchone()["cnt"]
+            if current_count >= effective["max_companies"]:
+                db.close()
+                limit_msg = f"Your plan allows up to {effective['max_companies']} companies. Please upgrade to connect more."
+                return HTMLResponse(content=f"""<html><body>
+                    <h2>Company Limit Reached</h2><p>{limit_msg}</p>
+                    <script>
+                        if (window.opener) {{
+                            window.opener.postMessage({{type:'qbo_auth_error', error:'{limit_msg}'}}, '*');
+                            window.close();
+                        }}
+                    </script></body></html>""")
         cid = str(uuid.uuid4())
 
     # Save company with tokens
@@ -2790,7 +2904,7 @@ async def get_plans():
 
 @app.get("/api/billing/subscription")
 async def get_subscription(authorization: str = Header(None)):
-    """Get current org's subscription status."""
+    """Get current org's subscription status, with trial-aware plan resolution."""
     token = _extract_token(authorization)
     user = get_current_user(token)
     org_id = get_org_id(user)
@@ -2800,12 +2914,16 @@ async def get_subscription(authorization: str = Header(None)):
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
     org_dict = dict(org)
+    effective = get_effective_plan(org_dict)
     return {
-        "plan": org_dict.get("plan", "free"),
-        "max_companies": org_dict.get("max_companies", 3),
+        "plan": effective["plan"],
+        "max_companies": effective["max_companies"],
         "subscription_status": org_dict.get("subscription_status", "none"),
         "stripe_customer_id": org_dict.get("stripe_customer_id", ""),
-        "trial_ends_at": org_dict.get("trial_ends_at", ""),
+        "trial_ends_at": effective.get("trial_ends_at", ""),
+        "trial_active": effective.get("trial_active", False),
+        "trial_days_remaining": effective.get("trial_days_remaining", 0),
+        "trial_expired": effective.get("trial_expired", False),
     }
 
 
