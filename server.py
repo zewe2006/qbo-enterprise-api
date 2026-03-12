@@ -49,7 +49,7 @@ from typing import List, Optional
 # ---------- AI Chat Config ----------
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-AI_MODEL = os.environ.get("AI_MODEL", "gemini-2.0-flash-lite")
+AI_MODEL = os.environ.get("AI_MODEL", "gemini-2.5-flash-lite")
 
 # ---------- Stripe Config ----------
 
