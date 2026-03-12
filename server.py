@@ -2941,6 +2941,86 @@ async def dashboard_summary(
     return live_data
 
 
+@app.get("/api/dashboard/revenue-trend")
+async def revenue_trend(
+    months: int = 12,
+    company_ids: str = None,
+    authorization: str = Header(None),
+):
+    """Return monthly revenue + expenses for the trailing N months.
+    Used by the dashboard revenue trend chart."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+    db = get_db()
+    connected = db.execute(
+        "SELECT id, name FROM companies WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != '' AND org_id = ?",
+        (org_id,),
+    ).fetchall()
+    db.close()
+
+    if company_ids:
+        selected = set(company_ids.split(","))
+        connected = [c for c in connected if c["id"] in selected]
+
+    now = datetime.now()
+    results = []
+
+    # Last complete month as reference point
+    lm_month = (now.month - 1) or 12
+    lm_year = now.year if now.month > 1 else now.year - 1
+
+    for i in range(months - 1, -1, -1):
+        # Go back i months from last complete month
+        total_months_back = lm_year * 12 + lm_month - i
+        y = (total_months_back - 1) // 12
+        m = ((total_months_back - 1) % 12) + 1
+
+        last_day = calendar.monthrange(y, m)[1]
+        start = f"{y}-{m:02d}-01"
+        end = f"{y}-{m:02d}-{last_day:02d}"
+
+        month_reports = []
+        for company in connected:
+            try:
+                rp = await qbo_get_report(get_db(), company["id"], "ProfitAndLoss", {
+                    "start_date": start, "end_date": end, "accounting_method": "Accrual",
+                })
+                if _has_report_data(rp):
+                    month_reports.append(rp)
+            except Exception:
+                pass
+
+        revenue = 0
+        expenses = 0
+        net_income = 0
+        if month_reports:
+            merged = _merge_reports(month_reports)
+            for sec in (merged.get("Rows") or {}).get("Row", []):
+                grp = sec.get("group", "")
+                try:
+                    val = float(sec.get("Summary", {}).get("ColData", [{}])[1].get("value", 0))
+                except (IndexError, ValueError, TypeError):
+                    val = 0
+                if grp == "Income":
+                    revenue = val
+                elif grp == "Expenses":
+                    expenses = abs(val)
+                elif grp == "NetIncome":
+                    net_income = val
+
+        results.append({
+            "month": calendar.month_abbr[m],
+            "year": y,
+            "label": f"{calendar.month_abbr[m]} {y}",
+            "revenue": round(revenue, 2),
+            "expenses": round(expenses, 2),
+            "net_income": round(net_income, 2),
+        })
+
+    return {"months": results}
+
+
 # =====================================================================
 #  STRIPE BILLING
 # =====================================================================
