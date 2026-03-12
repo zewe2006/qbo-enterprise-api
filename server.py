@@ -3547,9 +3547,10 @@ async def chat(req: ChatMessage, authorization: str = Header(None)):
 
         # === PASS 1: Get AI response (may contain action:fetch_data) ===
         reply = await _call_gemini(system_msg, contents)
+        logger.info("Chat Pass 1 reply (first 300 chars): %s", reply[:300])
 
         # Check if the AI wants to fetch data
-        fetch_match = _re.search(r'```action:fetch_data\n(.*?)```', reply, _re.DOTALL)
+        fetch_match = _re.search(r'```action:fetch_data\s*\n(.*?)```', reply, _re.DOTALL)
         if fetch_match:
             try:
                 fetch_params = json.loads(fetch_match.group(1).strip())
