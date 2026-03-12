@@ -3649,7 +3649,20 @@ async def chat(req: ChatMessage, authorization: str = Header(None)):
                 contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
         contents.append({"role": "user", "parts": [{"text": req.message}]})
 
-        reply = await _call_gemini_with_retry(system_msg, contents, max_tokens=4000 if financial_context else 2000)
+        # If we have financial context, use a simplified system prompt to avoid
+        # UNEXPECTED_TOOL_CALL errors caused by action blocks in large contexts
+        if financial_context:
+            simple_system = f"""You are the AI assistant for Consolidated Report, a multi-company QuickBooks Online reporting dashboard.
+
+The user asked a financial question. Answer using the data below. Be specific with actual dollar amounts formatted with $ signs and commas.
+If per-company data is available and relevant, show a breakdown by company.
+Be concise and helpful.
+Today's date: {today}.
+
+{financial_context}"""
+            reply = await _call_gemini(simple_system, contents, max_tokens=4000)
+        else:
+            reply = await _call_gemini_with_retry(system_msg, contents, max_tokens=2000)
 
         return {"reply": reply}
 
