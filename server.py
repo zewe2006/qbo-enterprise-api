@@ -278,6 +278,24 @@ def init_db():
             updated_at TEXT DEFAULT (datetime('now')),
             UNIQUE(company_id, platform, org_id)
         );
+
+        CREATE TABLE IF NOT EXISTS delivery_import_history (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL,
+            company_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            store_name TEXT DEFAULT '',
+            statement_period TEXT DEFAULT '',
+            payout_count INTEGER DEFAULT 0,
+            entry_count INTEGER DEFAULT 0,
+            prefix TEXT DEFAULT '',
+            mapping TEXT DEFAULT '{}',
+            status TEXT DEFAULT 'csv_downloaded',
+            qbo_je_ids TEXT DEFAULT '[]',
+            csv_content TEXT DEFAULT '',
+            created_by TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        );
     """)
 
     # Safe column additions
@@ -3442,6 +3460,7 @@ class GenerateCSVRequest(BaseModel):
     parsed: dict
     mapping: dict
     prefix: str = "UBER"
+    company_id: str = ""
 
 
 @app.post("/api/delivery-import/csv")
@@ -3452,6 +3471,7 @@ async def delivery_csv(
     """Generate QBO journal entry CSV from parsed payout data + account mapping."""
     token = _extract_token(authorization)
     user = get_current_user(token)
+    org_id = get_org_id(user)
 
     entries = _generate_journal_entries(req.parsed, req.mapping, req.prefix)
     if not entries:
@@ -3466,8 +3486,32 @@ async def delivery_csv(
                          e["debit"] if e["debit"] else "", e["credit"] if e["credit"] else "",
                          e["description"]])
 
+    csv_content = output.getvalue()
+
+    # Save to history
+    if req.company_id:
+        try:
+            history_id = str(uuid.uuid4())
+            db = get_db()
+            db.execute(
+                """INSERT INTO delivery_import_history
+                   (id, org_id, company_id, platform, store_name, statement_period,
+                    payout_count, entry_count, prefix, mapping, status, qbo_je_ids,
+                    csv_content, created_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (history_id, org_id, req.company_id, req.parsed.get("platform", ""),
+                 req.parsed.get("store_name", ""), req.parsed.get("statement_period", ""),
+                 len(req.parsed.get("payouts", [])), len(entries), req.prefix,
+                 json.dumps(req.mapping), "csv_downloaded", "[]",
+                 csv_content, user["email"]),
+            )
+            db.commit()
+            db.close()
+        except Exception as e:
+            logger.warning("Failed to save delivery import history: %s", str(e))
+
     return {
-        "csv_content": output.getvalue(),
+        "csv_content": csv_content,
         "entries": entries,
         "entry_count": len(entries),
         "payout_count": len(req.parsed.get("payouts", [])),
@@ -3538,6 +3582,225 @@ async def save_delivery_mapping(
     db.close()
 
     return {"ok": True}
+
+
+class ExportQBORequest(BaseModel):
+    company_id: str
+    parsed: dict
+    mapping: dict
+    prefix: str = "UBER"
+
+
+@app.post("/api/delivery-import/export-qbo")
+async def export_delivery_to_qbo(
+    req: ExportQBORequest,
+    authorization: str = Header(None),
+):
+    """Push delivery import journal entries directly into QuickBooks via API."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+
+    entries = _generate_journal_entries(req.parsed, req.mapping, req.prefix)
+    if not entries:
+        raise HTTPException(status_code=400, detail="No journal entries could be generated")
+
+    db = get_db()
+
+    # Helper: look up QBO account ID + type from cached account name
+    def find_account_info(company_id, account_name):
+        if not account_name:
+            return None, None
+        row = db.execute(
+            """SELECT qbo_account_id, account_type FROM company_accounts
+               WHERE company_id = ? AND (fully_qualified_name = ? OR name = ?) AND active = 1
+               LIMIT 1""",
+            (company_id, account_name, account_name)
+        ).fetchone()
+        if row:
+            return row["qbo_account_id"], row["account_type"]
+        return None, None
+
+    # Group entries by journal_no (each payout = one JE)
+    from collections import OrderedDict
+    je_groups = OrderedDict()
+    for e in entries:
+        jno = e["journal_no"]
+        if jno not in je_groups:
+            je_groups[jno] = {"date": e["journal_date"], "lines": []}
+        je_groups[jno]["lines"].append(e)
+
+    platform_label = "Uber Eats" if req.parsed["platform"] == "ubereats" else "DoorDash"
+    posted_je_ids = []
+    errors = []
+
+    for jno, group in je_groups.items():
+        je_lines = []
+        missing_accounts = []
+
+        for line in group["lines"]:
+            acct_id, acct_type = find_account_info(req.company_id, line["account"])
+            if not acct_id:
+                missing_accounts.append(line["account"])
+                continue
+
+            posting_type = "Debit" if line["debit"] else "Credit"
+            amount = line["debit"] if line["debit"] else line["credit"]
+
+            detail = {
+                "PostingType": posting_type,
+                "AccountRef": {"value": acct_id}
+            }
+            je_lines.append({
+                "DetailType": "JournalEntryLineDetail",
+                "Amount": round(abs(float(amount)), 2),
+                "Description": line.get("description", ""),
+                "JournalEntryLineDetail": detail
+            })
+
+        if missing_accounts:
+            errors.append(f"{jno}: account(s) not found in QBO: {', '.join(missing_accounts)}")
+            continue
+
+        if not je_lines:
+            continue
+
+        # Parse the journal date to QBO format (YYYY-MM-DD)
+        date_str = group["date"]
+        try:
+            dt = datetime.strptime(date_str, "%m/%d/%y")
+            qbo_date = dt.strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            try:
+                dt = datetime.strptime(date_str.replace(",", ""), "%b %d %Y")
+                qbo_date = dt.strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                qbo_date = date_str
+
+        payload = {
+            "TxnDate": qbo_date,
+            "Line": je_lines,
+            "PrivateNote": f"{platform_label} Import: {jno} - {req.parsed.get('statement_period', '')}"
+        }
+
+        try:
+            result = await qbo_api_call(
+                db, req.company_id,
+                "journalentry?minorversion=65",
+                method="POST", params=payload
+            )
+            je_id = result.get("JournalEntry", {}).get("Id")
+            if je_id:
+                posted_je_ids.append({"journal_no": jno, "qbo_id": je_id})
+        except HTTPException as he:
+            errors.append(f"{jno}: QBO error - {he.detail[:200]}")
+        except Exception as ex:
+            errors.append(f"{jno}: error - {str(ex)[:200]}")
+
+    # Build CSV content for history
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Journal No", "Journal Date", "Account", "Debit", "Credit", "Description"])
+    for e in entries:
+        writer.writerow([e["journal_no"], e["journal_date"], e["account"],
+                         e["debit"] if e["debit"] else "", e["credit"] if e["credit"] else "",
+                         e["description"]])
+
+    # Save to history
+    status = "exported" if posted_je_ids and not errors else "partial" if posted_je_ids else "failed"
+    history_id = str(uuid.uuid4())
+    db.execute(
+        """INSERT INTO delivery_import_history
+           (id, org_id, company_id, platform, store_name, statement_period,
+            payout_count, entry_count, prefix, mapping, status, qbo_je_ids,
+            csv_content, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (history_id, org_id, req.company_id, req.parsed["platform"],
+         req.parsed.get("store_name", ""), req.parsed.get("statement_period", ""),
+         len(req.parsed.get("payouts", [])), len(entries), req.prefix,
+         json.dumps(req.mapping), status, json.dumps(posted_je_ids),
+         output.getvalue(), user["email"]),
+    )
+    db.commit()
+    db.close()
+
+    return {
+        "status": status,
+        "history_id": history_id,
+        "posted": posted_je_ids,
+        "posted_count": len(posted_je_ids),
+        "total_count": len(je_groups),
+        "errors": errors if errors else None,
+    }
+
+
+@app.get("/api/delivery-import/history")
+async def get_delivery_import_history(
+    company_id: str = None,
+    authorization: str = Header(None),
+):
+    """Get delivery import history for the org, optionally filtered by company."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+
+    db = get_db()
+    if company_id:
+        rows = db.execute(
+            """SELECT id, company_id, platform, store_name, statement_period,
+                      payout_count, entry_count, prefix, status, qbo_je_ids,
+                      created_by, created_at
+               FROM delivery_import_history
+               WHERE org_id = ? AND company_id = ?
+               ORDER BY created_at DESC LIMIT 50""",
+            (org_id, company_id),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            """SELECT id, company_id, platform, store_name, statement_period,
+                      payout_count, entry_count, prefix, status, qbo_je_ids,
+                      created_by, created_at
+               FROM delivery_import_history
+               WHERE org_id = ?
+               ORDER BY created_at DESC LIMIT 50""",
+            (org_id,),
+        ).fetchall()
+    db.close()
+
+    history = []
+    for r in rows:
+        row = dict(r)
+        row["qbo_je_ids"] = json.loads(row.get("qbo_je_ids", "[]"))
+        history.append(row)
+
+    return {"history": history}
+
+
+@app.get("/api/delivery-import/history/{history_id}/csv")
+async def download_history_csv(
+    history_id: str,
+    authorization: str = Header(None),
+):
+    """Download the CSV from a past import."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+
+    db = get_db()
+    row = db.execute(
+        "SELECT csv_content, platform, statement_period FROM delivery_import_history WHERE id = ? AND org_id = ?",
+        (history_id, org_id),
+    ).fetchone()
+    db.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Import not found")
+
+    return {
+        "csv_content": row["csv_content"],
+        "platform": row["platform"],
+        "statement_period": row["statement_period"],
+    }
 
 
 # =====================================================================
