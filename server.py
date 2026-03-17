@@ -3060,17 +3060,19 @@ def _parse_ubereats_pdf(pdf_bytes: bytes) -> dict:
             if candidate and not _re.match(r'(Monthly|Statement|Food Terminal|Payout|Note)', candidate):
                 pass
 
-    # Better store name extraction
-    store_match = _re.search(r'(?:Monthly\nStatement\n[A-Za-z]+ \d{4}\n)(.+?)\n\d+', full_text)
-    if store_match:
-        store_name = store_match.group(1).strip()
+    # Better store name extraction: look for a line right before an address ("1234 Street Name")
+    for i, line in enumerate(lines):
+        if i + 1 < len(lines) and _re.match(r'^\d+\s+[A-Z]', lines[i + 1].strip()):
+            candidate = line.strip()
+            # Must look like a business name, not a dollar amount or generic label
+            if candidate and not _re.match(r'(\$|Tax|Total|Net|Monthly|Statement|Earnings|Fees|Marketing|Payout)', candidate) and len(candidate) > 3:
+                store_name = candidate
+                break
     if not store_name:
-        # Try after the period line
-        for i, line in enumerate(lines):
-            if _re.match(r'^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', line.strip()) and '20' in line:
-                if i + 1 < len(lines):
-                    store_name = lines[i + 1].strip()
-                    break
+        # Fallback: try matching "Food Terminal (...)" or similar store patterns
+        name_match = _re.search(r'((?:Food|Restaurant|Kitchen|Cafe|Bakery|Bar|Grill|Deli)[^\n]{3,40})', full_text)
+        if name_match:
+            store_name = name_match.group(1).strip()
 
     # Split into sections: Consolidated Monthly Summary + individual payouts
     # We want the individual payout sections (pages 2+)
@@ -3086,10 +3088,19 @@ def _parse_ubereats_pdf(pdf_bytes: bytes) -> dict:
             payout["period_start"] = period_match.group(1).strip()
             payout["period_end"] = period_match.group(2).strip()
 
-        # Extract deposit date
+        # Extract deposit date — columns may be interleaved so the date line may not
+        # be directly after "Deposit Initiated :". Search for the date line near it.
         deposit_match = _re.search(r'Deposit Initiated\s*:\s*\n?([A-Za-z]+ \d{1,2},\s*\d{4})', section)
         if deposit_match:
             payout["deposit_date"] = deposit_match.group(1).strip()
+        else:
+            # Fallback: find "Deposit Initiated" then search within next few lines for a date
+            di_pos = section.find('Deposit Initiated')
+            if di_pos >= 0:
+                nearby = section[di_pos:di_pos+200]
+                date_m = _re.search(r'\n([A-Z][a-z]{2} \d{1,2},\s*\d{4})\n', nearby)
+                if date_m:
+                    payout["deposit_date"] = date_m.group(1).strip()
 
         # Extract payout ref ID
         ref_match = _re.search(r'Payout Ref\.? ID\s*:\s*\n?([A-Z0-9]+)', section)
