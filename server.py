@@ -18,6 +18,8 @@ Self-hosted setup:
 """
 import base64
 import calendar
+import csv
+import io
 import hashlib
 import json
 import logging
@@ -41,7 +43,7 @@ logging.basicConfig(
 logger = logging.getLogger("consolidatedreport")
 
 import httpx
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Header, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -266,6 +268,15 @@ def init_db():
             UNIQUE(user_id, company_id),
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS delivery_mappings (
+            id TEXT PRIMARY KEY,
+            company_id TEXT NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'ubereats',
+            org_id TEXT NOT NULL,
+            mapping TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(company_id, platform, org_id)
         );
     """)
 
@@ -3019,6 +3030,503 @@ async def revenue_trend(
         })
 
     return {"months": results}
+
+
+# =====================================================================
+#  DELIVERY PLATFORM IMPORT (Uber Eats / DoorDash)
+# =====================================================================
+
+def _parse_ubereats_pdf(pdf_bytes: bytes) -> dict:
+    """Parse an Uber Eats monthly statement PDF into structured payout data."""
+    import pdfplumber
+    pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
+    full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    pdf.close()
+
+    # Extract store name and period from page 1
+    store_name = ""
+    statement_period = ""
+    lines = full_text.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip() == "Monthly" and i + 1 < len(lines) and lines[i + 1].strip() == "Statement":
+            # Next non-empty line after date header should have store name nearby
+            pass
+        if _re.match(r'^[A-Z][a-z]+ \d{4}$', line.strip()):
+            statement_period = line.strip()
+        # Store name: line before an address-like line
+        addr_match = _re.match(r'^\d+\s+.+,\s*$', line.strip())
+        if addr_match and i > 0 and not store_name:
+            candidate = lines[i - 1].strip()
+            if candidate and not _re.match(r'(Monthly|Statement|Food Terminal|Payout|Note)', candidate):
+                pass
+
+    # Better store name extraction
+    store_match = _re.search(r'(?:Monthly\nStatement\n[A-Za-z]+ \d{4}\n)(.+?)\n\d+', full_text)
+    if store_match:
+        store_name = store_match.group(1).strip()
+    if not store_name:
+        # Try after the period line
+        for i, line in enumerate(lines):
+            if _re.match(r'^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', line.strip()) and '20' in line:
+                if i + 1 < len(lines):
+                    store_name = lines[i + 1].strip()
+                    break
+
+    # Split into sections: Consolidated Monthly Summary + individual payouts
+    # We want the individual payout sections (pages 2+)
+    sections = _re.split(r'Payout Period\s*:\s*\n?', full_text)
+
+    payouts = []
+    for sec_idx, section in enumerate(sections[1:], 1):  # skip first (consolidated summary)
+        payout = {"lines": []}
+
+        # Extract payout period
+        period_match = _re.search(r'([A-Za-z]+ \d{1,2},\s*\d{4})\s*-\s*([A-Za-z]+ \d{1,2},\s*\d{4})', section)
+        if period_match:
+            payout["period_start"] = period_match.group(1).strip()
+            payout["period_end"] = period_match.group(2).strip()
+
+        # Extract deposit date
+        deposit_match = _re.search(r'Deposit Initiated\s*:\s*\n?([A-Za-z]+ \d{1,2},\s*\d{4})', section)
+        if deposit_match:
+            payout["deposit_date"] = deposit_match.group(1).strip()
+
+        # Extract payout ref ID
+        ref_match = _re.search(r'Payout Ref\.? ID\s*:\s*\n?([A-Z0-9]+)', section)
+        if ref_match:
+            payout["ref_id"] = ref_match.group(1).strip()
+
+        # Helper: extract dollar amount from line like "Sales (62 Orders)\n$2,961.70" or "Marketplace Fees\n-$704.43"
+        def extract_amount(pattern):
+            m = _re.search(pattern + r'\s*\n?\s*(-?\$[\d,]+\.\d{2})', section)
+            if m:
+                val = m.group(1).replace('$', '').replace(',', '')
+                return float(val)
+            return 0.0
+
+        # Extract key line items
+        sales = extract_amount(r'Sales \(\d+ Orders?\)')
+        tax_on_sales = extract_amount(r'Tax on Sales')
+        tips = extract_amount(r'Tips')
+        container_fees = extract_amount(r'Container Fees(?!\n.*Tax)')
+        other_earnings = extract_amount(r'Other Earnings(?!\n.*Tax)')
+        marketplace_fees = extract_amount(r'Marketplace Fees(?!\n.*Tax)')
+        other_charges = extract_amount(r'Other Charges(?!\n.*Tax)')
+        offers_on_items = extract_amount(r'Offers On Items')
+        marketing_adjustment = extract_amount(r'Marketing Adjustment')
+        other_offer_charges = extract_amount(r'Other Offer Charges')
+        tax_on_offers = extract_amount(r'Tax on offer spends')
+        ad_spends = extract_amount(r'Ad Spends')
+        ad_credits = extract_amount(r'Ad Credits')
+        chargeback = extract_amount(r'Net Chargeback Amount')
+        chargeback_tax = extract_amount(r'Net Tax On Chargeback')
+        marketplace_facilitator_tax = extract_amount(r'Marketplace Facilitator Tax')
+        adjustments = extract_amount(r'Adjustments(?!\n.*Tax)')
+        net_payout = extract_amount(r'Net Payout')
+
+        # Total uber fees
+        total_uber_fees = abs(marketplace_fees) + abs(other_charges)
+        # Total marketing
+        total_marketing = abs(offers_on_items) + abs(other_offer_charges) + abs(ad_spends) - abs(marketing_adjustment) - abs(ad_credits) + abs(tax_on_offers)
+        # Total chargebacks
+        total_chargebacks = abs(chargeback) + abs(chargeback_tax)
+
+        payout["sales"] = round(sales, 2)
+        payout["tax_on_sales"] = round(tax_on_sales, 2)
+        payout["tips"] = round(tips, 2)
+        payout["container_fees"] = round(container_fees, 2)
+        payout["other_earnings"] = round(other_earnings, 2)
+        payout["marketplace_fees"] = round(abs(marketplace_fees), 2)
+        payout["other_charges"] = round(abs(other_charges), 2)
+        payout["total_uber_fees"] = round(total_uber_fees, 2)
+        payout["offers_on_items"] = round(abs(offers_on_items), 2)
+        payout["marketing_adjustment"] = round(abs(marketing_adjustment), 2)
+        payout["other_offer_charges"] = round(abs(other_offer_charges), 2)
+        payout["tax_on_offers"] = round(abs(tax_on_offers), 2)
+        payout["ad_spends"] = round(abs(ad_spends), 2)
+        payout["ad_credits"] = round(abs(ad_credits), 2)
+        payout["total_marketing"] = round(total_marketing, 2)
+        payout["chargeback"] = round(abs(chargeback), 2)
+        payout["chargeback_tax"] = round(abs(chargeback_tax), 2)
+        payout["total_chargebacks"] = round(total_chargebacks, 2)
+        payout["marketplace_facilitator_tax"] = round(abs(marketplace_facilitator_tax), 2)
+        payout["adjustments"] = round(abs(adjustments), 2)
+        payout["net_payout"] = round(abs(net_payout), 2)
+
+        if payout.get("deposit_date") or payout.get("net_payout"):
+            payouts.append(payout)
+
+    return {
+        "platform": "ubereats",
+        "store_name": store_name,
+        "statement_period": statement_period,
+        "payouts": payouts,
+    }
+
+
+def _parse_doordash_pdf(pdf_bytes: bytes) -> dict:
+    """Parse a DoorDash monthly statement PDF into structured payout data."""
+    import pdfplumber
+    pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
+    full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    pdf.close()
+
+    # Extract store name: appears after "Store Sales (xxx)" on line below
+    store_name = ""
+    store_match = _re.search(r'(?:Store\s+.*?\n)(.+?)\n', full_text)
+    if store_match:
+        store_name = store_match.group(1).strip()
+
+    # Extract statement period
+    period = ""
+    period_match = _re.search(r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w* \d{4}) Statement', full_text)
+    if period_match:
+        period = period_match.group(1)
+
+    # Split by "Payout #XXXXXXXXX" sections
+    sections = _re.split(r'Payout #(\d+)', full_text)
+
+    payouts = []
+    for i in range(1, len(sections), 2):
+        payout_id = sections[i]
+        body = sections[i + 1] if i + 1 < len(sections) else ""
+        payout = {"payout_id": payout_id}
+
+        # Extract dollar amount: "Label $X,XXX.XX" or "Label -$X,XXX.XX"
+        def extract_amt(pattern):
+            m = _re.search(pattern + r'\s+(-?\$[\d,]+\.\d{2})', body)
+            if m:
+                return float(m.group(1).replace('$', '').replace(',', ''))
+            return 0.0
+
+        # Deposit date
+        dm = _re.search(r'Deposit Initiated\s+([A-Za-z]+ \d{1,2},?\s*\d{4})', body)
+        if dm:
+            payout["deposit_date"] = dm.group(1).strip()
+
+        # Transaction dates
+        tm = _re.search(r'Transaction Dates\s+([A-Za-z]+ \d{1,2},?\s*\d{4})\s*-\s*([A-Za-z]+ \d{1,2},?\s*\d{4})', body)
+        if tm:
+            payout["period_start"] = tm.group(1).strip()
+            payout["period_end"] = tm.group(2).strip()
+
+        payout["subtotal"] = round(extract_amt(r'Subtotal'), 2)
+        payout["tax_subtotal"] = round(extract_amt(r'Tax \(subtotal\)'), 2)
+        payout["staff_tips"] = round(extract_amt(r'Staff tips'), 2)
+        payout["customer_fees"] = round(extract_amt(r'Customer fees(?!\s+\$)'), 2)
+        payout["commission"] = round(abs(extract_amt(r'Commission(?!\s+&)')), 2)
+        payout["merchant_fees"] = round(abs(extract_amt(r'Merchant fees')), 2)
+        payout["tax_merchant_fees"] = round(abs(extract_amt(r'Tax \(merchant fees\)')), 2)
+        payout["marketing_fees"] = round(abs(extract_amt(r'Marketing fees')), 2)
+        payout["customer_discounts_you"] = round(abs(extract_amt(r'Customer discounts funded by you')), 2)
+        payout["customer_discounts_dd"] = round(abs(extract_amt(r'Customer discounts funded by DoorDash')), 2)
+        payout["marketing_credit"] = round(abs(extract_amt(r'Marketing credit')), 2)
+        payout["error_charges"] = round(abs(extract_amt(r'Error charges')), 2)
+        payout["adjustments"] = round(extract_amt(r'Adjustments'), 2)
+        payout["net_payout"] = round(extract_amt(r'Net payout'), 2)
+
+        # Calculated totals
+        payout["total_commission_fees"] = round(payout["commission"] + payout["merchant_fees"], 2)
+        payout["total_marketing"] = round(payout["marketing_fees"] + payout["customer_discounts_you"] - payout["marketing_credit"], 2)
+        payout["sales"] = round(payout["subtotal"] + payout["staff_tips"], 2)
+
+        if payout.get("deposit_date") or payout.get("net_payout"):
+            payouts.append(payout)
+
+    return {
+        "platform": "doordash",
+        "store_name": store_name,
+        "statement_period": period,
+        "payouts": payouts,
+    }
+
+
+def _detect_platform(text: str) -> str:
+    """Detect whether a PDF is from Uber Eats or DoorDash."""
+    text_lower = text.lower()
+    if "uber eats" in text_lower or "marketplace fees" in text_lower and "uber" in text_lower:
+        return "ubereats"
+    if "doordash" in text_lower or "dasher" in text_lower:
+        return "doordash"
+    # Heuristic: Uber Eats uses "Marketplace Fees", DoorDash uses "Commission"
+    if "marketplace fees" in text_lower:
+        return "ubereats"
+    if "commission" in text_lower:
+        return "doordash"
+    return "unknown"
+
+
+def _generate_journal_entries(parsed: dict, mapping: dict, prefix: str = "UBER") -> list:
+    """Convert parsed payout data into journal entry rows.
+    mapping = {category: qbo_account_name} e.g. {"bank": "Metro City Bank", "income": "Ubereats", ...}
+    Returns list of dicts with: journal_no, journal_date, account, debit, credit, description
+    """
+    entries = []
+    platform_label = "Uber Eats" if parsed["platform"] == "ubereats" else "DoorDash"
+
+    for idx, payout in enumerate(parsed["payouts"], 1):
+        journal_no = f"{prefix}-{idx}"
+        # Parse deposit date
+        date_str = payout.get("deposit_date", "")
+        try:
+            dt = datetime.strptime(date_str.replace(",", ""), "%b %d %Y")
+            formatted_date = dt.strftime("%-m/%-d/%y")
+        except (ValueError, TypeError):
+            formatted_date = date_str
+
+        period_desc = ""
+        if payout.get("period_start") and payout.get("period_end"):
+            period_desc = f"{payout['period_start']} - {payout['period_end']}"
+
+        # DEBIT: Bank account (net payout)
+        if payout.get("net_payout", 0) > 0:
+            entries.append({
+                "journal_no": journal_no,
+                "journal_date": formatted_date,
+                "account": mapping.get("bank", "Checking"),
+                "debit": round(payout["net_payout"], 2),
+                "credit": "",
+                "description": f"{platform_label} Payout {period_desc}".strip(),
+            })
+
+        # DEBIT: Platform fees
+        fee_amount = 0
+        if parsed["platform"] == "ubereats":
+            fee_amount = payout.get("total_uber_fees", 0)
+        else:
+            fee_amount = payout.get("total_commission_fees", 0)
+        if fee_amount > 0:
+            entries.append({
+                "journal_no": journal_no,
+                "journal_date": formatted_date,
+                "account": mapping.get("fees", "Delivery Fee"),
+                "debit": round(fee_amount, 2),
+                "credit": "",
+                "description": f"{platform_label} Marketplace Fees",
+            })
+
+        # DEBIT: Marketing
+        mkt_amount = payout.get("total_marketing", 0)
+        if mkt_amount > 0:
+            entries.append({
+                "journal_no": journal_no,
+                "journal_date": formatted_date,
+                "account": mapping.get("marketing", "Advertising & Marketing:Online Order Marketing"),
+                "debit": round(mkt_amount, 2),
+                "credit": "",
+                "description": f"{platform_label} Marketing Spends",
+            })
+
+        # DEBIT: Chargebacks (Uber Eats)
+        cb_amount = payout.get("total_chargebacks", 0)
+        if cb_amount > 0:
+            entries.append({
+                "journal_no": journal_no,
+                "journal_date": formatted_date,
+                "account": mapping.get("chargeback", "Chargeback"),
+                "debit": round(cb_amount, 2),
+                "credit": "",
+                "description": f"{platform_label} Chargebacks",
+            })
+
+        # DEBIT: Error charges (DoorDash)
+        err_amount = payout.get("error_charges", 0)
+        if err_amount > 0:
+            entries.append({
+                "journal_no": journal_no,
+                "journal_date": formatted_date,
+                "account": mapping.get("chargeback", "Chargeback"),
+                "debit": round(err_amount, 2),
+                "credit": "",
+                "description": f"{platform_label} Error Charges",
+            })
+
+        # DEBIT: Adjustments
+        adj_amount = payout.get("adjustments", 0)
+        if adj_amount > 0:
+            entries.append({
+                "journal_no": journal_no,
+                "journal_date": formatted_date,
+                "account": mapping.get("adjustments", "Other Expense"),
+                "debit": round(adj_amount, 2),
+                "credit": "",
+                "description": f"{platform_label} Adjustments",
+            })
+
+        # CREDIT: Total income (Sales amount = sum of all debits)
+        total_debits = sum(e["debit"] for e in entries if e["journal_no"] == journal_no and e["debit"])
+        if total_debits > 0:
+            entries.append({
+                "journal_no": journal_no,
+                "journal_date": formatted_date,
+                "account": mapping.get("income", "Ubereats"),
+                "debit": "",
+                "credit": round(total_debits, 2),
+                "description": f"Total {platform_label} Income",
+            })
+
+    return entries
+
+
+class DeliveryMappingUpdate(BaseModel):
+    company_id: str
+    platform: str  # "ubereats" or "doordash"
+    mapping: dict  # {"bank": "Metro City Bank", "income": "Ubereats", ...}
+
+
+@app.post("/api/delivery-import/parse")
+async def parse_delivery_statement(
+    file: UploadFile = File(...),
+    authorization: str = Header(None),
+):
+    """Upload and parse an Uber Eats or DoorDash PDF statement.
+    Returns parsed payout data and detected platform."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+    pdf_bytes = await file.read()
+    if len(pdf_bytes) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+
+    # Detect platform
+    import pdfplumber
+    try:
+        pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
+        first_page_text = pdf.pages[0].extract_text() or ""
+        pdf.close()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read PDF: {str(e)}")
+
+    platform = _detect_platform(first_page_text)
+    if platform == "unknown":
+        raise HTTPException(status_code=400, detail="Could not detect platform. Please upload an Uber Eats or DoorDash monthly statement.")
+
+    try:
+        if platform == "ubereats":
+            parsed = _parse_ubereats_pdf(pdf_bytes)
+        else:
+            parsed = _parse_doordash_pdf(pdf_bytes)
+    except Exception as e:
+        logger.error("Delivery import parse error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Error parsing PDF: {str(e)}")
+
+    return parsed
+
+
+@app.post("/api/delivery-import/generate-csv")
+async def generate_delivery_csv(
+    authorization: str = Header(None),
+):
+    """Generate QBO-compatible journal entry CSV from parsed data.
+    Expects JSON body with: parsed (from /parse), mapping (account mapping), prefix (journal number prefix)."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    return {}  # Placeholder — actual CSV generation handled in the combined endpoint below
+
+
+class GenerateCSVRequest(BaseModel):
+    parsed: dict
+    mapping: dict
+    prefix: str = "UBER"
+
+
+@app.post("/api/delivery-import/csv")
+async def delivery_csv(
+    req: GenerateCSVRequest,
+    authorization: str = Header(None),
+):
+    """Generate QBO journal entry CSV from parsed payout data + account mapping."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    entries = _generate_journal_entries(req.parsed, req.mapping, req.prefix)
+    if not entries:
+        raise HTTPException(status_code=400, detail="No journal entries could be generated")
+
+    # Build CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Journal No", "Journal Date", "Account", "Debit", "Credit", "Description"])
+    for e in entries:
+        writer.writerow([e["journal_no"], e["journal_date"], e["account"],
+                         e["debit"] if e["debit"] else "", e["credit"] if e["credit"] else "",
+                         e["description"]])
+
+    return {
+        "csv_content": output.getvalue(),
+        "entries": entries,
+        "entry_count": len(entries),
+        "payout_count": len(req.parsed.get("payouts", [])),
+    }
+
+
+@app.get("/api/delivery-import/mapping")
+async def get_delivery_mapping(
+    company_id: str,
+    platform: str = "ubereats",
+    authorization: str = Header(None),
+):
+    """Get saved account mapping for a company/platform."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+
+    db = get_db()
+    row = db.execute(
+        "SELECT mapping FROM delivery_mappings WHERE company_id = ? AND platform = ? AND org_id = ?",
+        (company_id, platform, org_id),
+    ).fetchone()
+    db.close()
+
+    if row:
+        return {"mapping": json.loads(row[0])}
+
+    # Return defaults
+    if platform == "ubereats":
+        return {"mapping": {
+            "bank": "Checking",
+            "income": "Ubereats",
+            "fees": "Delivery Fee",
+            "marketing": "Advertising & Marketing:Online Order Marketing",
+            "chargeback": "Chargeback",
+            "adjustments": "Other Expense",
+        }}
+    else:
+        return {"mapping": {
+            "bank": "Checking",
+            "income": "DoorDash",
+            "fees": "Delivery Fee",
+            "marketing": "Advertising & Marketing:Online Order Marketing",
+            "chargeback": "Chargeback",
+            "adjustments": "Other Expense",
+        }}
+
+
+@app.post("/api/delivery-import/mapping")
+async def save_delivery_mapping(
+    req: DeliveryMappingUpdate,
+    authorization: str = Header(None),
+):
+    """Save account mapping for a company/platform."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+
+    db = get_db()
+    db.execute(
+        "INSERT INTO delivery_mappings (id, company_id, platform, org_id, mapping, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(company_id, platform, org_id) DO UPDATE SET mapping = excluded.mapping, updated_at = excluded.updated_at",
+        (str(uuid.uuid4()), req.company_id, req.platform, org_id,
+         json.dumps(req.mapping), datetime.now().isoformat()),
+    )
+    db.commit()
+    db.close()
+
+    return {"ok": True}
 
 
 # =====================================================================
