@@ -1745,6 +1745,7 @@ async def _get_live_consolidated(params, qbo_report_name, report_type, org_id=No
     company_names = []
     # Per-company data for by_company view
     per_company_reports = {}  # keyed by company name
+    per_company_prior_reports = {}  # keyed by company name (prior year/month)
     for company in companies:
         try:
             result = await _get_live_report_for_company(
@@ -1769,8 +1770,12 @@ async def _get_live_consolidated(params, qbo_report_name, report_type, org_id=No
             # Don't filter comparison reports — empty prior period ($0) is valid data
             if result.get("prior_year"):
                 prior_year_reports.append(result["prior_year"])
+                if params.by_company:
+                    per_company_prior_reports[company["name"]] = result["prior_year"]
             if result.get("prior_month"):
                 prior_month_reports.append(result["prior_month"])
+                if params.by_company and company["name"] not in per_company_prior_reports:
+                    per_company_prior_reports[company["name"]] = result["prior_month"]
         except Exception:
             pass
 
@@ -1787,6 +1792,12 @@ async def _get_live_consolidated(params, qbo_report_name, report_type, org_id=No
         for cname, creport in per_company_reports.items():
             company_breakdowns[cname] = _build_flat_lookup(creport)
         out["company_breakdowns"] = company_breakdowns
+        # Include per-company prior period breakdown for by_company comparison view
+        if per_company_prior_reports:
+            company_breakdowns_prior = {}
+            for cname, creport in per_company_prior_reports.items():
+                company_breakdowns_prior[cname] = _build_flat_lookup(creport)
+            out["company_breakdowns_prior"] = company_breakdowns_prior
 
     if params.compare_prior_year:
         if prior_year_reports:
