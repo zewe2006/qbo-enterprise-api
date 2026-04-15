@@ -1150,6 +1150,92 @@ async def delete_user(user_id: str, authorization: str = Header(None)):
     return {"deleted": user_id}
 
 
+@app.post("/api/users/{user_id}/generate-token")
+async def generate_user_token(user_id: str, authorization: str = Header(None)):
+    """Admin-only: mint a new API session token for any user in the org.
+
+    Used for creating long-lived API tokens to share with integrations
+    without needing the user's password.
+    """
+    token_in = _extract_token(authorization)
+    admin = get_current_user(token_in)
+    require_admin(admin)
+    org_id = get_org_id(admin)
+    db = get_db()
+    target = db.execute(
+        "SELECT id, email, name, role FROM users WHERE id = ? AND org_id = ?",
+        (user_id, org_id),
+    ).fetchone()
+    if not target:
+        db.close()
+        raise HTTPException(status_code=404, detail="User not found")
+    new_token = str(uuid.uuid4())
+    db.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (new_token, user_id))
+    db.commit()
+    db.close()
+    return {
+        "token": new_token,
+        "user": {
+            "id": target["id"],
+            "email": target["email"],
+            "name": target["name"],
+            "role": target["role"],
+        },
+    }
+
+
+@app.get("/api/users/{user_id}/sessions")
+async def list_user_sessions(user_id: str, authorization: str = Header(None)):
+    """Admin-only: list all active API session tokens for a user."""
+    token_in = _extract_token(authorization)
+    admin = get_current_user(token_in)
+    require_admin(admin)
+    org_id = get_org_id(admin)
+    db = get_db()
+    target = db.execute(
+        "SELECT id FROM users WHERE id = ? AND org_id = ?", (user_id, org_id)
+    ).fetchone()
+    if not target:
+        db.close()
+        raise HTTPException(status_code=404, detail="User not found")
+    rows = db.execute(
+        "SELECT token FROM sessions WHERE user_id = ?", (user_id,)
+    ).fetchall()
+    db.close()
+    # Return masked tokens (first 8 + last 4 chars) for display; full token only visible on creation
+    return {
+        "sessions": [
+            {
+                "token_preview": f"{r['token'][:8]}...{r['token'][-4:]}",
+                "token_full": r["token"],
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@app.delete("/api/users/{user_id}/sessions")
+async def revoke_user_sessions(user_id: str, authorization: str = Header(None)):
+    """Admin-only: revoke ALL active session tokens for a user."""
+    token_in = _extract_token(authorization)
+    admin = get_current_user(token_in)
+    require_admin(admin)
+    org_id = get_org_id(admin)
+    db = get_db()
+    target = db.execute(
+        "SELECT id FROM users WHERE id = ? AND org_id = ?", (user_id, org_id)
+    ).fetchone()
+    if not target:
+        db.close()
+        raise HTTPException(status_code=404, detail="User not found")
+    result = db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    revoked = result.rowcount
+    db.commit()
+    db.close()
+    return {"revoked": revoked}
+
+
 # =====================================================================
 #  QBO OAuth 2.0 — Direct Integration
 # =====================================================================
@@ -2781,6 +2867,363 @@ async def delete_ic_entry(entry_id: str, authorization: str = Header(None)):
     db.commit()
     db.close()
     return {"id": entry_id, "deleted": True}
+
+
+# =====================================================================
+#  SINGLE-COMPANY JOURNAL ENTRIES (REST)
+# =====================================================================
+
+class JournalEntryLine(BaseModel):
+    posting_type: str  # "Debit" or "Credit"
+    account_name: str  # must match an active account (name or fully_qualified_name)
+    amount: float
+    entity_id: Optional[str] = None  # Customer/Vendor ID (required for A/R, A/P)
+    entity_type: Optional[str] = None  # "Customer" or "Vendor" (auto-detected if omitted)
+    description: Optional[str] = None
+    class_id: Optional[str] = None  # Optional QBO class reference
+
+
+class JournalEntryRequest(BaseModel):
+    date: str  # YYYY-MM-DD
+    lines: List[JournalEntryLine]
+    doc_number: Optional[str] = None  # optional journal number
+    private_note: Optional[str] = None  # memo / private note
+    currency: Optional[str] = None  # e.g. "USD"
+
+
+class BulkJournalEntryRequest(BaseModel):
+    entries: List[JournalEntryRequest]
+    stop_on_error: Optional[bool] = False  # if True, abort remaining entries after first failure
+
+
+# --- Shared helpers for single + bulk JE creation ---
+
+def _find_account_in_company(db, company_id: str, account_name: str):
+    """Look up an account by name or fully_qualified_name. Returns (qbo_id, type) or (None, None)."""
+    if not account_name:
+        return None, None
+    row = db.execute(
+        """SELECT qbo_account_id, account_type FROM company_accounts
+           WHERE company_id = ? AND (fully_qualified_name = ? OR name = ?) AND active = 1
+           LIMIT 1""",
+        (company_id, account_name, account_name),
+    ).fetchone()
+    if row:
+        return row["qbo_account_id"], row["account_type"]
+    return None, None
+
+
+def _build_je_payload(db, company_id: str, company_name: str, req: "JournalEntryRequest"):
+    """Validate a single JE request and build the QBO payload.
+
+    Returns (payload, total_debits, line_count) on success.
+    Raises HTTPException on validation failure.
+    """
+    if not req.lines or len(req.lines) < 2:
+        raise HTTPException(status_code=400, detail="At least 2 lines required")
+
+    total_debits = round(sum(abs(l.amount) for l in req.lines if l.posting_type.lower() == "debit"), 2)
+    total_credits = round(sum(abs(l.amount) for l in req.lines if l.posting_type.lower() == "credit"), 2)
+    if abs(total_debits - total_credits) > 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Journal entry does not balance: debits={total_debits} credits={total_credits}",
+        )
+
+    je_lines = []
+    missing_accounts = []
+    for line in req.lines:
+        posting = line.posting_type.strip().capitalize()
+        if posting not in ("Debit", "Credit"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid posting_type '{line.posting_type}' (must be 'Debit' or 'Credit')",
+            )
+        acct_id, acct_type = _find_account_in_company(db, company_id, line.account_name)
+        if not acct_id:
+            missing_accounts.append(line.account_name)
+            continue
+
+        detail = {"PostingType": posting, "AccountRef": {"value": acct_id}}
+
+        # Auto-attach entity for A/R and A/P
+        if line.entity_id:
+            ent_type = line.entity_type
+            if not ent_type:
+                if acct_type == "Accounts Receivable":
+                    ent_type = "Customer"
+                elif acct_type == "Accounts Payable":
+                    ent_type = "Vendor"
+            if ent_type:
+                detail["Entity"] = {"EntityRef": {"value": line.entity_id}, "Type": ent_type}
+
+        if line.class_id:
+            detail["ClassRef"] = {"value": line.class_id}
+
+        je_lines.append({
+            "DetailType": "JournalEntryLineDetail",
+            "Amount": round(abs(line.amount), 2),
+            "Description": line.description or "",
+            "JournalEntryLineDetail": detail,
+        })
+
+    if missing_accounts:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Account(s) not found in {company_name}: {', '.join(missing_accounts)}. Sync the company to refresh the chart of accounts.",
+        )
+
+    payload = {"TxnDate": req.date, "Line": je_lines}
+    if req.doc_number:
+        payload["DocNumber"] = req.doc_number
+    if req.private_note:
+        payload["PrivateNote"] = req.private_note
+    if req.currency:
+        payload["CurrencyRef"] = {"value": req.currency}
+
+    return payload, total_debits, len(je_lines)
+
+
+async def _post_je_to_qbo(db, company_id: str, payload: dict):
+    """POST a built payload to QBO. Returns the JournalEntry dict. Raises HTTPException on failure."""
+    result = await qbo_api_call(
+        db, company_id, "journalentry?minorversion=65",
+        method="POST", params=payload,
+    )
+    return result.get("JournalEntry", {})
+
+
+@app.post("/api/companies/{company_id}/journal-entries")
+async def create_journal_entry(
+    company_id: str,
+    req: JournalEntryRequest,
+    authorization: str = Header(None),
+):
+    """Create a single journal entry directly in a company's QBO book.
+
+    Admin access required. The lines must balance (sum of debits == sum of credits).
+    Accounts are looked up by name in the cached chart of accounts — run a
+    company sync first if newly added accounts are missing.
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+
+    db = get_db()
+    company = db.execute(
+        "SELECT id, name FROM companies WHERE id = ? AND org_id = ?",
+        (company_id, org_id),
+    ).fetchone()
+    if not company:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    try:
+        payload, total_debits, line_count = _build_je_payload(db, company_id, company["name"], req)
+    except HTTPException:
+        db.close()
+        raise
+
+    try:
+        je = await _post_je_to_qbo(db, company_id, payload)
+        db.close()
+        return {
+            "status": "posted",
+            "company_id": company_id,
+            "company_name": company["name"],
+            "journal_entry_id": je.get("Id"),
+            "doc_number": je.get("DocNumber"),
+            "date": je.get("TxnDate"),
+            "total": total_debits,
+            "line_count": line_count,
+        }
+    except HTTPException as he:
+        db.close()
+        raise HTTPException(status_code=502, detail=f"QBO error: {he.detail}")
+    except Exception as e:
+        db.close()
+        raise HTTPException(status_code=500, detail=f"Failed to post journal entry: {str(e)}")
+
+
+@app.post("/api/companies/{company_id}/journal-entries/bulk")
+async def create_journal_entries_bulk(
+    company_id: str,
+    req: BulkJournalEntryRequest,
+    authorization: str = Header(None),
+):
+    """Create multiple journal entries in a single request.
+
+    Each entry is validated and posted to QBO independently. By default, failures
+    on one entry do NOT stop the batch — all entries are attempted and per-entry
+    results returned. Set `stop_on_error: true` to abort on the first failure.
+
+    Max batch size: 100 entries.
+
+    Response includes a summary and a per-entry result array with:
+    - `index` — position in the request array
+    - `status` — "posted", "validation_error", or "qbo_error"
+    - `journal_entry_id` — QBO ID if posted
+    - `doc_number`, `date`, `total`, `line_count` — entry details if posted
+    - `error` — error message if failed
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+
+    if not req.entries:
+        raise HTTPException(status_code=400, detail="No entries provided")
+    if len(req.entries) > 100:
+        raise HTTPException(status_code=400, detail=f"Batch size {len(req.entries)} exceeds max of 100")
+
+    db = get_db()
+    company = db.execute(
+        "SELECT id, name FROM companies WHERE id = ? AND org_id = ?",
+        (company_id, org_id),
+    ).fetchone()
+    if not company:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    results = []
+    posted_count = 0
+    failed_count = 0
+    aborted_count = 0
+
+    for idx, entry_req in enumerate(req.entries):
+        # Phase 1: validate + build payload
+        try:
+            payload, total_debits, line_count = _build_je_payload(
+                db, company_id, company["name"], entry_req
+            )
+        except HTTPException as he:
+            results.append({
+                "index": idx,
+                "status": "validation_error",
+                "error": he.detail,
+                "doc_number": entry_req.doc_number,
+                "date": entry_req.date,
+            })
+            failed_count += 1
+            if req.stop_on_error:
+                # Mark remaining entries as aborted
+                for ridx in range(idx + 1, len(req.entries)):
+                    rentry = req.entries[ridx]
+                    results.append({
+                        "index": ridx,
+                        "status": "aborted",
+                        "error": "Batch stopped on prior error",
+                        "doc_number": rentry.doc_number,
+                        "date": rentry.date,
+                    })
+                    aborted_count += 1
+                break
+            continue
+
+        # Phase 2: post to QBO
+        try:
+            je = await _post_je_to_qbo(db, company_id, payload)
+            results.append({
+                "index": idx,
+                "status": "posted",
+                "journal_entry_id": je.get("Id"),
+                "doc_number": je.get("DocNumber") or entry_req.doc_number,
+                "date": je.get("TxnDate") or entry_req.date,
+                "total": total_debits,
+                "line_count": line_count,
+            })
+            posted_count += 1
+        except HTTPException as he:
+            results.append({
+                "index": idx,
+                "status": "qbo_error",
+                "error": str(he.detail),
+                "doc_number": entry_req.doc_number,
+                "date": entry_req.date,
+            })
+            failed_count += 1
+            if req.stop_on_error:
+                for ridx in range(idx + 1, len(req.entries)):
+                    rentry = req.entries[ridx]
+                    results.append({
+                        "index": ridx,
+                        "status": "aborted",
+                        "error": "Batch stopped on prior error",
+                        "doc_number": rentry.doc_number,
+                        "date": rentry.date,
+                    })
+                    aborted_count += 1
+                break
+        except Exception as e:
+            results.append({
+                "index": idx,
+                "status": "qbo_error",
+                "error": f"Unexpected error: {str(e)}",
+                "doc_number": entry_req.doc_number,
+                "date": entry_req.date,
+            })
+            failed_count += 1
+            if req.stop_on_error:
+                for ridx in range(idx + 1, len(req.entries)):
+                    rentry = req.entries[ridx]
+                    results.append({
+                        "index": ridx,
+                        "status": "aborted",
+                        "error": "Batch stopped on prior error",
+                        "doc_number": rentry.doc_number,
+                        "date": rentry.date,
+                    })
+                    aborted_count += 1
+                break
+
+    db.close()
+
+    if posted_count == len(req.entries):
+        overall = "success"
+    elif posted_count == 0:
+        overall = "failed"
+    else:
+        overall = "partial"
+
+    return {
+        "status": overall,
+        "company_id": company_id,
+        "company_name": company["name"],
+        "total": len(req.entries),
+        "posted": posted_count,
+        "failed": failed_count,
+        "aborted": aborted_count,
+        "results": results,
+    }
+
+
+@app.get("/api/companies/{company_id}/journal-entries/{je_id}")
+async def get_journal_entry(
+    company_id: str,
+    je_id: str,
+    authorization: str = Header(None),
+):
+    """Fetch a journal entry by its QBO ID for verification/display."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+    db = get_db()
+    company = db.execute(
+        "SELECT id FROM companies WHERE id = ? AND org_id = ?", (company_id, org_id)
+    ).fetchone()
+    if not company:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
+    try:
+        result = await qbo_api_call(
+            db, company_id, f"journalentry/{je_id}?minorversion=65", method="GET",
+        )
+        db.close()
+        return result.get("JournalEntry", result)
+    except HTTPException as he:
+        db.close()
+        raise HTTPException(status_code=502, detail=f"QBO error: {he.detail}")
 
 
 # =====================================================================
