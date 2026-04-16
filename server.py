@@ -3862,8 +3862,9 @@ async def revenue_trend(
                     val = 0
                 if grp == "Income":
                     revenue = val
-                elif grp == "Expenses":
-                    expenses = abs(val)
+                elif grp in ("Expenses", "CostOfGoodsSold", "OtherExpense"):
+                    # Total expenses = Operating Expenses + COGS + Other Expenses
+                    expenses += abs(val)
                 elif grp == "NetIncome":
                     net_income = val
 
