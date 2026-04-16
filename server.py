@@ -1703,9 +1703,38 @@ async def get_company_accounts(company_id: str, authorization: str = Header(None
     return [dict(r) for r in rows]
 
 
+async def _fetch_all_qbo_entities(db, company_id: str, entity_name: str):
+    """Fetch all pages of a QBO entity using STARTPOSITION/MAXRESULTS pagination.
+
+    QBO caps each query response at 1000 rows. This paginates through them all.
+    Returns the combined list of entity dicts.
+    """
+    all_items = []
+    start = 1
+    page_size = 1000
+    max_pages = 50  # safety cap (50k entities)
+    for _ in range(max_pages):
+        query = (
+            f"SELECT * FROM {entity_name} WHERE Active = true "
+            f"STARTPOSITION {start} MAXRESULTS {page_size}"
+        )
+        result = await qbo_api_call(
+            db, company_id, "query", method="GET",
+            params={"query": query, "minorversion": "65"},
+        )
+        items = result.get("QueryResponse", {}).get(entity_name, [])
+        if not items:
+            break
+        all_items.extend(items)
+        if len(items) < page_size:
+            break  # last page
+        start += page_size
+    return all_items
+
+
 @app.get("/api/companies/{company_id}/customers")
 async def get_company_customers(company_id: str, authorization: str = Header(None)):
-    """Fetch active customers from QBO for a specific company."""
+    """Fetch all active customers from QBO for a specific company (paginated)."""
     token = _extract_token(authorization)
     user = get_current_user(token)
     org_id = get_org_id(user)
@@ -1715,12 +1744,11 @@ async def get_company_customers(company_id: str, authorization: str = Header(Non
         db.close()
         raise HTTPException(status_code=404, detail="Company not found")
     try:
-        result = await qbo_api_call(
-            db, company_id, "query", method="GET",
-            params={"query": "SELECT * FROM Customer WHERE Active = true", "minorversion": "65"}
-        )
-        customers = result.get("QueryResponse", {}).get("Customer", [])
-        return [{"id": c["Id"], "name": c.get("DisplayName", c.get("CompanyName", "")), "type": "Customer"} for c in customers]
+        customers = await _fetch_all_qbo_entities(db, company_id, "Customer")
+        return [
+            {"id": c["Id"], "name": c.get("DisplayName", c.get("CompanyName", "")), "type": "Customer"}
+            for c in customers
+        ]
     except HTTPException:
         raise
     except Exception as ex:
@@ -1731,7 +1759,7 @@ async def get_company_customers(company_id: str, authorization: str = Header(Non
 
 @app.get("/api/companies/{company_id}/vendors")
 async def get_company_vendors(company_id: str, authorization: str = Header(None)):
-    """Fetch active vendors from QBO for a specific company."""
+    """Fetch all active vendors from QBO for a specific company (paginated)."""
     token = _extract_token(authorization)
     user = get_current_user(token)
     org_id = get_org_id(user)
@@ -1741,12 +1769,11 @@ async def get_company_vendors(company_id: str, authorization: str = Header(None)
         db.close()
         raise HTTPException(status_code=404, detail="Company not found")
     try:
-        result = await qbo_api_call(
-            db, company_id, "query", method="GET",
-            params={"query": "SELECT * FROM Vendor WHERE Active = true", "minorversion": "65"}
-        )
-        vendors = result.get("QueryResponse", {}).get("Vendor", [])
-        return [{"id": v["Id"], "name": v.get("DisplayName", v.get("CompanyName", "")), "type": "Vendor"} for v in vendors]
+        vendors = await _fetch_all_qbo_entities(db, company_id, "Vendor")
+        return [
+            {"id": v["Id"], "name": v.get("DisplayName", v.get("CompanyName", "")), "type": "Vendor"}
+            for v in vendors
+        ]
     except HTTPException:
         raise
     except Exception as ex:
