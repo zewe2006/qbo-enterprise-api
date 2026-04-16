@@ -1703,6 +1703,351 @@ async def get_company_accounts(company_id: str, authorization: str = Header(None
     return [dict(r) for r in rows]
 
 
+# =====================================================================
+#  CHART OF ACCOUNTS - CRUD
+# =====================================================================
+
+# Valid QBO AccountType values (enforced by QBO API)
+_VALID_ACCOUNT_TYPES = {
+    "Bank", "Other Current Asset", "Fixed Asset", "Other Asset",
+    "Accounts Receivable", "Equity", "Expense", "Other Expense",
+    "Cost of Goods Sold", "Accounts Payable", "Credit Card",
+    "Long Term Liability", "Other Current Liability", "Income",
+    "Other Income",
+}
+
+
+class CreateAccountRequest(BaseModel):
+    name: str
+    account_type: str                          # One of _VALID_ACCOUNT_TYPES
+    account_sub_type: Optional[str] = None     # e.g. "Checking", "Rent"
+    description: Optional[str] = None
+    parent_name: Optional[str] = None          # Create as sub-account of this parent (by name)
+    parent_qbo_id: Optional[str] = None        # Or by QBO ID directly
+    currency: Optional[str] = None             # e.g. "USD"
+    acct_num: Optional[str] = None             # Optional account number
+
+
+class UpdateAccountRequest(BaseModel):
+    name: Optional[str] = None
+    account_sub_type: Optional[str] = None
+    description: Optional[str] = None
+    acct_num: Optional[str] = None
+
+
+def _upsert_account_cache(db, company_id: str, qbo_account: dict):
+    """Insert or update the local company_accounts cache from a QBO Account dict."""
+    qbo_id = qbo_account.get("Id")
+    if not qbo_id:
+        return
+    name = qbo_account.get("Name", "")
+    fqn = qbo_account.get("FullyQualifiedName") or name
+    acct_type = qbo_account.get("AccountType")
+    sub_type = qbo_account.get("AccountSubType")
+    classification = qbo_account.get("Classification")
+    balance = float(qbo_account.get("CurrentBalance", 0) or 0)
+    active = 1 if qbo_account.get("Active", True) else 0
+
+    # Check if row exists
+    existing = db.execute(
+        "SELECT id FROM company_accounts WHERE company_id = ? AND qbo_account_id = ?",
+        (company_id, qbo_id),
+    ).fetchone()
+    if existing:
+        db.execute(
+            """UPDATE company_accounts
+               SET name = ?, fully_qualified_name = ?, account_type = ?,
+                   account_sub_type = ?, classification = ?, current_balance = ?,
+                   active = ?, cached_at = datetime('now')
+               WHERE id = ?""",
+            (name, fqn, acct_type, sub_type, classification, balance, active, existing["id"]),
+        )
+    else:
+        db.execute(
+            """INSERT INTO company_accounts
+               (id, company_id, qbo_account_id, name, fully_qualified_name,
+                account_type, account_sub_type, classification, current_balance, active)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (str(uuid.uuid4()), company_id, qbo_id, name, fqn, acct_type,
+             sub_type, classification, balance, active),
+        )
+    db.commit()
+
+
+@app.post("/api/companies/{company_id}/accounts")
+async def create_company_account(
+    company_id: str,
+    req: CreateAccountRequest,
+    authorization: str = Header(None),
+):
+    """Create a new account in the company's QBO chart of accounts.
+
+    Admin only. The new account is also added to the local cache so it can be
+    referenced immediately by JE endpoints without needing a full sync.
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+
+    if req.account_type not in _VALID_ACCOUNT_TYPES:
+        valid = ", ".join(sorted(_VALID_ACCOUNT_TYPES))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid account_type '{req.account_type}'. Must be one of: {valid}",
+        )
+
+    db = get_db()
+    company = db.execute(
+        "SELECT id, name FROM companies WHERE id = ? AND org_id = ?",
+        (company_id, org_id),
+    ).fetchone()
+    if not company:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    # Check for duplicate name in local cache
+    existing = db.execute(
+        """SELECT id FROM company_accounts
+           WHERE company_id = ? AND LOWER(name) = LOWER(?) AND active = 1""",
+        (company_id, req.name),
+    ).fetchone()
+    if existing:
+        db.close()
+        raise HTTPException(
+            status_code=409,
+            detail=f"An account named '{req.name}' already exists in {company['name']}",
+        )
+
+    # Resolve parent account reference
+    parent_ref = None
+    if req.parent_qbo_id:
+        parent_ref = req.parent_qbo_id
+    elif req.parent_name:
+        prow = db.execute(
+            """SELECT qbo_account_id FROM company_accounts
+               WHERE company_id = ? AND (fully_qualified_name = ? OR name = ?) AND active = 1
+               LIMIT 1""",
+            (company_id, req.parent_name, req.parent_name),
+        ).fetchone()
+        if not prow:
+            db.close()
+            raise HTTPException(
+                status_code=400,
+                detail=f"Parent account '{req.parent_name}' not found",
+            )
+        parent_ref = prow["qbo_account_id"]
+
+    # Build QBO payload
+    payload = {
+        "Name": req.name,
+        "AccountType": req.account_type,
+    }
+    if req.account_sub_type:
+        payload["AccountSubType"] = req.account_sub_type
+    if req.description:
+        payload["Description"] = req.description
+    if req.acct_num:
+        payload["AcctNum"] = req.acct_num
+    if req.currency:
+        payload["CurrencyRef"] = {"value": req.currency}
+    if parent_ref:
+        payload["SubAccount"] = True
+        payload["ParentRef"] = {"value": parent_ref}
+
+    try:
+        result = await qbo_api_call(
+            db, company_id, "account?minorversion=65",
+            method="POST", params=payload,
+        )
+        acct = result.get("Account", {})
+        _upsert_account_cache(db, company_id, acct)
+        db.close()
+        return {
+            "status": "created",
+            "company_id": company_id,
+            "qbo_account_id": acct.get("Id"),
+            "name": acct.get("Name"),
+            "fully_qualified_name": acct.get("FullyQualifiedName"),
+            "account_type": acct.get("AccountType"),
+            "account_sub_type": acct.get("AccountSubType"),
+            "classification": acct.get("Classification"),
+            "active": acct.get("Active", True),
+        }
+    except HTTPException as he:
+        db.close()
+        raise HTTPException(status_code=502, detail=f"QBO error: {he.detail}")
+    except Exception as e:
+        db.close()
+        raise HTTPException(status_code=500, detail=f"Failed to create account: {str(e)}")
+
+
+async def _qbo_get_account(db, company_id: str, qbo_account_id: str) -> dict:
+    """Fetch current state of a single account from QBO (needed for update sync token)."""
+    result = await qbo_api_call(
+        db, company_id, f"account/{qbo_account_id}?minorversion=65", method="GET",
+    )
+    return result.get("Account", {})
+
+
+@app.patch("/api/companies/{company_id}/accounts/{qbo_account_id}")
+async def update_company_account(
+    company_id: str,
+    qbo_account_id: str,
+    req: UpdateAccountRequest,
+    authorization: str = Header(None),
+):
+    """Update an existing account's name, description, sub_type, or account number.
+
+    Admin only. Uses QBO sparse update so only provided fields are modified.
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+
+    db = get_db()
+    company = db.execute(
+        "SELECT id, name FROM companies WHERE id = ? AND org_id = ?",
+        (company_id, org_id),
+    ).fetchone()
+    if not company:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    # Need to fetch current SyncToken for the update
+    try:
+        current = await _qbo_get_account(db, company_id, qbo_account_id)
+    except HTTPException as he:
+        db.close()
+        raise HTTPException(status_code=404, detail=f"Account not found in QBO: {he.detail}")
+
+    if not current:
+        db.close()
+        raise HTTPException(status_code=404, detail="Account not found in QBO")
+
+    # Build sparse update payload
+    payload = {
+        "Id": current["Id"],
+        "SyncToken": current["SyncToken"],
+        "sparse": True,
+    }
+    changed = False
+    if req.name is not None:
+        payload["Name"] = req.name
+        changed = True
+    if req.account_sub_type is not None:
+        payload["AccountSubType"] = req.account_sub_type
+        changed = True
+    if req.description is not None:
+        payload["Description"] = req.description
+        changed = True
+    if req.acct_num is not None:
+        payload["AcctNum"] = req.acct_num
+        changed = True
+
+    if not changed:
+        db.close()
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    try:
+        result = await qbo_api_call(
+            db, company_id, "account?minorversion=65",
+            method="POST", params=payload,
+        )
+        acct = result.get("Account", {})
+        _upsert_account_cache(db, company_id, acct)
+        db.close()
+        return {
+            "status": "updated",
+            "qbo_account_id": acct.get("Id"),
+            "name": acct.get("Name"),
+            "fully_qualified_name": acct.get("FullyQualifiedName"),
+            "account_type": acct.get("AccountType"),
+            "account_sub_type": acct.get("AccountSubType"),
+            "active": acct.get("Active", True),
+        }
+    except HTTPException as he:
+        db.close()
+        raise HTTPException(status_code=502, detail=f"QBO error: {he.detail}")
+    except Exception as e:
+        db.close()
+        raise HTTPException(status_code=500, detail=f"Failed to update account: {str(e)}")
+
+
+@app.delete("/api/companies/{company_id}/accounts/{qbo_account_id}")
+async def deactivate_company_account(
+    company_id: str,
+    qbo_account_id: str,
+    authorization: str = Header(None),
+):
+    """Deactivate (soft-delete) an account.
+
+    QBO does not allow true deletion of accounts. This sets Active=false.
+    The account will no longer appear in active account lists or JE dropdowns,
+    but historical transactions remain intact. Admin only.
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+
+    db = get_db()
+    company = db.execute(
+        "SELECT id FROM companies WHERE id = ? AND org_id = ?",
+        (company_id, org_id),
+    ).fetchone()
+    if not company:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    try:
+        current = await _qbo_get_account(db, company_id, qbo_account_id)
+    except HTTPException as he:
+        db.close()
+        raise HTTPException(status_code=404, detail=f"Account not found in QBO: {he.detail}")
+
+    if not current:
+        db.close()
+        raise HTTPException(status_code=404, detail="Account not found in QBO")
+
+    if not current.get("Active", True):
+        db.close()
+        return {
+            "status": "already_inactive",
+            "qbo_account_id": qbo_account_id,
+            "name": current.get("Name"),
+        }
+
+    payload = {
+        "Id": current["Id"],
+        "SyncToken": current["SyncToken"],
+        "sparse": True,
+        "Active": False,
+    }
+
+    try:
+        result = await qbo_api_call(
+            db, company_id, "account?minorversion=65",
+            method="POST", params=payload,
+        )
+        acct = result.get("Account", {})
+        _upsert_account_cache(db, company_id, acct)
+        db.close()
+        return {
+            "status": "deactivated",
+            "qbo_account_id": acct.get("Id"),
+            "name": acct.get("Name"),
+            "active": acct.get("Active", False),
+        }
+    except HTTPException as he:
+        db.close()
+        raise HTTPException(status_code=502, detail=f"QBO error: {he.detail}")
+    except Exception as e:
+        db.close()
+        raise HTTPException(status_code=500, detail=f"Failed to deactivate account: {str(e)}")
+
+
 async def _fetch_all_qbo_entities(db, company_id: str, entity_name: str):
     """Fetch all pages of a QBO entity using STARTPOSITION/MAXRESULTS pagination.
 

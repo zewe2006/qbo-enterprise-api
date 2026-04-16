@@ -78,6 +78,112 @@ Returns all companies the authenticated user has access to.
 ### Get Company Chart of Accounts
 **GET** `/api/companies/{company_id}/accounts`
 
+### Create Account
+**POST** `/api/companies/{company_id}/accounts` — **admin only**
+
+Creates a new account in the company's QBO chart of accounts. The account is also immediately added to the local cache, so you can reference it by name in JE endpoints right away (no sync needed).
+
+**Request:**
+```json
+{
+  "name": "Marketing — Social Media",
+  "account_type": "Expense",
+  "account_sub_type": "AdvertisingPromotional",
+  "description": "Paid social campaigns",
+  "parent_name": "Marketing",
+  "acct_num": "6120"
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `name` | ✅ | Account name (must be unique in the company) |
+| `account_type` | ✅ | One of: `Bank`, `Other Current Asset`, `Fixed Asset`, `Other Asset`, `Accounts Receivable`, `Equity`, `Expense`, `Other Expense`, `Cost of Goods Sold`, `Accounts Payable`, `Credit Card`, `Long Term Liability`, `Other Current Liability`, `Income`, `Other Income` |
+| `account_sub_type` | optional | QBO-specific sub-type (e.g. `Checking`, `Rent`, `AdvertisingPromotional`) |
+| `description` | optional | Account description |
+| `parent_name` | optional | Create as a sub-account of this existing account (by name) |
+| `parent_qbo_id` | optional | Or provide the QBO account ID directly |
+| `acct_num` | optional | Account number |
+| `currency` | optional | Currency code (defaults to company's home currency) |
+
+**Response (200):**
+```json
+{
+  "status": "created",
+  "company_id": "...",
+  "qbo_account_id": "85",
+  "name": "Marketing — Social Media",
+  "fully_qualified_name": "Marketing:Marketing — Social Media",
+  "account_type": "Expense",
+  "account_sub_type": "AdvertisingPromotional",
+  "classification": "Expense",
+  "active": true
+}
+```
+
+**Error responses:**
+- `400` — Invalid `account_type` or parent account not found
+- `409` — Account with that name already exists in the company
+- `502` — QBO rejected the request
+
+### Update Account
+**PATCH** `/api/companies/{company_id}/accounts/{qbo_account_id}` — **admin only**
+
+Sparse update — only the fields you provide are changed. Cannot change `account_type` (QBO limitation — you'd have to create a new account and move transactions).
+
+**Request:**
+```json
+{
+  "name": "Marketing — Paid Social",
+  "description": "Updated description",
+  "account_sub_type": "AdvertisingPromotional",
+  "acct_num": "6121"
+}
+```
+
+All fields are optional, but at least one must be provided.
+
+**Response:**
+```json
+{
+  "status": "updated",
+  "qbo_account_id": "85",
+  "name": "Marketing — Paid Social",
+  "fully_qualified_name": "Marketing:Marketing — Paid Social",
+  "account_type": "Expense",
+  "account_sub_type": "AdvertisingPromotional",
+  "active": true
+}
+```
+
+### Deactivate Account
+**DELETE** `/api/companies/{company_id}/accounts/{qbo_account_id}` — **admin only**
+
+Sets `Active=false` in QBO. Historical transactions remain intact, but the account disappears from active lists and dropdowns.
+
+**⚠️ QBO does not allow true deletion of accounts** — this is a soft delete. To reactivate, use PATCH (currently requires re-activating via QBO UI; future enhancement).
+
+**Response:**
+```json
+{
+  "status": "deactivated",
+  "qbo_account_id": "85",
+  "name": "Marketing — Paid Social",
+  "active": false
+}
+```
+
+If already inactive:
+```json
+{
+  "status": "already_inactive",
+  "qbo_account_id": "85",
+  "name": "Marketing — Paid Social"
+}
+```
+
+
+
 ### Sync Company from QuickBooks
 **POST** `/api/companies/{company_id}/sync`
 
