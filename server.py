@@ -2024,6 +2024,9 @@ async def deactivate_company_account(
         "SyncToken": current["SyncToken"],
         "sparse": True,
         "Active": False,
+        # QBO requires these even in sparse deactivation
+        "Name": current.get("Name"),
+        "AccountType": current.get("AccountType"),
     }
 
     try:
