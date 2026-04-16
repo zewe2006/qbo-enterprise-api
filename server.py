@@ -1806,26 +1806,21 @@ async def create_company_account(
         db.close()
         raise HTTPException(status_code=404, detail="Company not found")
 
-    # Check for duplicate name in local cache
-    existing = db.execute(
-        """SELECT id FROM company_accounts
-           WHERE company_id = ? AND LOWER(name) = LOWER(?) AND active = 1""",
-        (company_id, req.name),
-    ).fetchone()
-    if existing:
-        db.close()
-        raise HTTPException(
-            status_code=409,
-            detail=f"An account named '{req.name}' already exists in {company['name']}",
-        )
-
-    # Resolve parent account reference
+    # Resolve parent account reference first (needed for duplicate check)
     parent_ref = None
+    parent_fqn = None
     if req.parent_qbo_id:
         parent_ref = req.parent_qbo_id
+        prow = db.execute(
+            """SELECT fully_qualified_name FROM company_accounts
+               WHERE company_id = ? AND qbo_account_id = ? AND active = 1 LIMIT 1""",
+            (company_id, req.parent_qbo_id),
+        ).fetchone()
+        if prow:
+            parent_fqn = prow["fully_qualified_name"]
     elif req.parent_name:
         prow = db.execute(
-            """SELECT qbo_account_id FROM company_accounts
+            """SELECT qbo_account_id, fully_qualified_name FROM company_accounts
                WHERE company_id = ? AND (fully_qualified_name = ? OR name = ?) AND active = 1
                LIMIT 1""",
             (company_id, req.parent_name, req.parent_name),
@@ -1837,6 +1832,23 @@ async def create_company_account(
                 detail=f"Parent account '{req.parent_name}' not found",
             )
         parent_ref = prow["qbo_account_id"]
+        parent_fqn = prow["fully_qualified_name"]
+
+    # Check for duplicate — scoped to the same parent.
+    # Two accounts CAN share a short name if their parents differ
+    # (e.g. Sales:Bread and Purchase:Bread are both valid in QBO).
+    expected_fqn = f"{parent_fqn}:{req.name}" if parent_fqn else req.name
+    existing = db.execute(
+        """SELECT id, fully_qualified_name FROM company_accounts
+           WHERE company_id = ? AND LOWER(fully_qualified_name) = LOWER(?) AND active = 1""",
+        (company_id, expected_fqn),
+    ).fetchone()
+    if existing:
+        db.close()
+        raise HTTPException(
+            status_code=409,
+            detail=f"An account '{existing['fully_qualified_name']}' already exists in {company['name']}",
+        )
 
     # Build QBO payload
     payload = {
