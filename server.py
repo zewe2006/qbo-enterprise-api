@@ -2696,6 +2696,17 @@ def _get_cached_report(params, report_type, org_id=None):
         "This Fiscal Quarter-to-date": f"{year}-qtd",
         "Last Fiscal Year": f"{year - 1}-full",
         "Today": f"{year}-current",
+        # Dashboard-side macros (lowercase / dash-delimited)
+        "this-year-to-date": f"{year}-ytd",
+        "ytd": f"{year}-ytd",
+        "this-quarter": f"{year}-qtd",
+        "qtd": f"{year}-qtd",
+        "last-quarter": (f"{year - 1}-q4" if datetime.now().month <= 3
+                         else f"{year}-q{(datetime.now().month - 1) // 3}"),
+        "this-month": f"{year}-mtd",
+        "mtd": f"{year}-mtd",
+        "last-month": f"{year}-last-month",
+        "last-year": f"{year - 1}-full",
     }
     period_key = macro_map.get(params.date_macro or "", f"{year}-ytd")
     # Build fallback chain: exact match → ytd → mtd → any available
@@ -5207,6 +5218,20 @@ def _resolve_period(start_date: Optional[str], end_date: Optional[str], macro: O
     if m in ("this-quarter", "qtd"):
         q_start_month = ((now.month - 1) // 3) * 3 + 1
         return f"{now.year}-{q_start_month:02d}-01", now.strftime("%Y-%m-%d"), f"Q{(q_start_month-1)//3+1} {now.year}"
+    if m == "last-quarter":
+        this_q = (now.month - 1) // 3  # 0..3
+        if this_q == 0:
+            y = now.year - 1; last_q = 3
+        else:
+            y = now.year; last_q = this_q - 1
+        start_month = last_q * 3 + 1
+        end_month = start_month + 2
+        last_day = calendar.monthrange(y, end_month)[1]
+        return (
+            f"{y}-{start_month:02d}-01",
+            f"{y}-{end_month:02d}-{last_day:02d}",
+            f"Q{last_q+1} {y}",
+        )
     if m in ("this-month", "mtd"):
         return f"{now.year}-{now.month:02d}-01", now.strftime("%Y-%m-%d"), f"{calendar.month_name[now.month]} {now.year}"
     if m == "last-year":
@@ -5476,10 +5501,12 @@ async def dividend_dashboard(req: DividendDashboardQuery, authorization: str = H
             pl_params = ReportParams(
                 company_id=co["id"],
                 start_date=period_start, end_date=period_end,
+                date_macro=req.date_macro,  # forwarded so the cache fallback finds the right period_key
             )
             cf_params = ReportParams(
                 company_id=co["id"],
                 start_date=period_start, end_date=period_end,
+                date_macro=req.date_macro,
             )
             pl = await get_profit_loss(pl_params, authorization)
             cf = await get_cash_flow(cf_params, authorization)
