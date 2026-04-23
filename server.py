@@ -5258,31 +5258,94 @@ def _cash_on_hand_by_company(db, company_ids: list):
     return {r["company_id"]: float(r["cash"] or 0) for r in rows}
 
 
-def _extract_pl_net_income(report: dict) -> float:
-    if not report: return 0.0
-    cur = report.get("current") or report
-    totals_obj = cur.get("totals") if isinstance(cur, dict) else None
-    if isinstance(totals_obj, dict):
-        for k in ("net_income", "NetIncome", "net_operating_income", "net_income_loss"):
-            if k in totals_obj:
-                try: return float(totals_obj[k])
-                except Exception: pass
-    if isinstance(cur, dict) and "net_income" in cur:
-        try: return float(cur["net_income"])
-        except Exception: pass
+def _walk_report_summary(report_obj: dict, group_names: tuple, col_index: int = 1) -> float:
+    """QBO report responses nest sections under Rows.Row[]. This walker
+    finds the first row whose `group` (or `type`/`header.ColData[0].value`)
+    matches any of the wanted group_names and returns its Summary column
+    total. Handles the shape produced by `qbo_get_report`."""
+    if not report_obj or not isinstance(report_obj, dict):
+        return 0.0
+    rows = (report_obj.get("Rows") or {}).get("Row") or []
+    wanted = set(group_names)
+    def _from_row(r):
+        try:
+            coldata = (r.get("Summary") or {}).get("ColData") or []
+            if len(coldata) > col_index:
+                v = coldata[col_index].get("value", "")
+                if v in (None, ""): return 0.0
+                return float(str(v).replace(",", ""))
+        except (ValueError, TypeError, AttributeError):
+            pass
+        return 0.0
+    for r in rows:
+        g = (r.get("group") or r.get("type") or "")
+        header_lbl = ""
+        try:
+            hd = (r.get("Header") or {}).get("ColData") or []
+            if hd: header_lbl = (hd[0].get("value") or "").strip()
+        except Exception:
+            pass
+        if g in wanted or header_lbl in wanted:
+            val = _from_row(r)
+            if val: return val
+        # Recurse into sub-sections
+        sub = r.get("Rows")
+        if sub and isinstance(sub, dict) and sub.get("Row"):
+            nested = _walk_report_summary({"Rows": sub}, group_names, col_index)
+            if nested: return nested
     return 0.0
 
 
-def _extract_cf_block(report: dict, key: str) -> float:
+def _extract_pl_net_income(report: dict) -> float:
+    """Pull Net Income out of a P&L report as returned by qbo_get_report().
+    Falls back across the common shape variants produced by QBO + the
+    consolidated merger (`_merge_reports`)."""
     if not report: return 0.0
-    cur = report.get("current") or report
-    totals_obj = cur.get("totals") if isinstance(cur, dict) else None
-    if isinstance(totals_obj, dict) and key in totals_obj:
-        try: return float(totals_obj[key])
-        except Exception: pass
-    if isinstance(cur, dict) and key in cur:
-        try: return float(cur[key])
-        except Exception: pass
+    # The dashboard passes the full handler response, which wraps the raw
+    # report under `current`. The importer-style shape omits that wrapper.
+    cur = report.get("current") if isinstance(report, dict) and "current" in report else report
+    if isinstance(cur, dict) and "Rows" in cur:
+        # QBO native shape
+        return _walk_report_summary(cur, ("NetIncome", "Net Income", "NET INCOME"))
+    # Fall through to flat shapes (cached projections / historical formats)
+    if isinstance(cur, dict):
+        totals_obj = cur.get("totals")
+        if isinstance(totals_obj, dict):
+            for k in ("net_income", "NetIncome", "net_operating_income", "net_income_loss"):
+                if k in totals_obj:
+                    try: return float(totals_obj[k])
+                    except Exception: pass
+        if "net_income" in cur:
+            try: return float(cur["net_income"])
+            except Exception: pass
+    return 0.0
+
+
+# Map dashboard-friendly CF block names to the QBO group/header labels
+_CF_GROUP_ALIASES = {
+    "operating_activities": ("OperatingActivities", "Operating Activities", "Net cash provided by operating activities"),
+    "investing_activities": ("InvestingActivities", "Investing Activities", "Net cash provided by investing activities"),
+    "financing_activities": ("FinancingActivities", "Financing Activities", "Net cash provided by financing activities"),
+    "net_cash_change":      ("NetCashIncrease", "Net cash increase for period", "CashIncreaseForPeriod"),
+}
+
+
+def _extract_cf_block(report: dict, key: str) -> float:
+    """Pull a named block (operating/investing/financing/net_cash_change)
+    out of a Cash Flow report."""
+    if not report: return 0.0
+    cur = report.get("current") if isinstance(report, dict) and "current" in report else report
+    if isinstance(cur, dict) and "Rows" in cur:
+        groups = _CF_GROUP_ALIASES.get(key) or (key,)
+        return _walk_report_summary(cur, tuple(groups))
+    if isinstance(cur, dict):
+        totals_obj = cur.get("totals")
+        if isinstance(totals_obj, dict) and key in totals_obj:
+            try: return float(totals_obj[key])
+            except Exception: pass
+        if key in cur:
+            try: return float(cur[key])
+            except Exception: pass
     return 0.0
 
 
@@ -5301,8 +5364,11 @@ async def dividend_dashboard(req: DividendDashboardQuery, authorization: str = H
     )
 
     db = get_db()
+    # All companies in the org — connected or not. Disconnected ones
+    # contribute zero P&L / cash-flow but still show any dividend events
+    # already recorded for them (from the importer or manual entry).
     co_rows = db.execute(
-        "SELECT id, name FROM companies WHERE org_id = ? AND status IN ('connected','synced')",
+        "SELECT id, name, status FROM companies WHERE org_id = ? AND status != 'deleted'",
         (org_id,),
     ).fetchall()
     if req.company_ids:
@@ -5465,8 +5531,11 @@ async def dividend_dashboard(req: DividendDashboardQuery, authorization: str = H
             row_flags.append("financing_variance")
 
         kinds = kind_by_co.get(co["id"], {"payment": 0.0, "managing_bonus": 0.0})
+        connected = (co["status"] in ("connected", "synced"))
         by_company.append({
             "company_id": co["id"], "company_name": co["name"],
+            "connected": connected,
+            "status": co["status"],
             "cash_on_hand": round(cash, 2),
             "net_income": round(ni, 2),
             "dividends_paid": round(div, 2),
