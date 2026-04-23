@@ -304,8 +304,19 @@ def init_db():
         ("industry", "TEXT"), ("qbo_plan", "TEXT"),
         ("access_token", "TEXT"), ("refresh_token", "TEXT"),
         ("token_expires_at", "TEXT"),
+        # Manual + Plaid support
+        ("source", "TEXT DEFAULT 'qbo'"),           # 'qbo' | 'manual'
+        ("supabase_company_id", "TEXT"),            # UUID mirror into Supabase
+        ("fiscal_year_start", "INTEGER DEFAULT 1"), # month 1-12
+        ("base_currency", "TEXT DEFAULT 'USD'"),
+        ("ein", "TEXT"),
     ]:
         _add_column_safe(db, "companies", col, ctype)
+
+    # Backfill source for any pre-existing rows that have a QBO realm but no source set
+    db.execute("UPDATE companies SET source='qbo' WHERE source IS NULL AND qbo_realm_id IS NOT NULL")
+    db.execute("UPDATE companies SET source='qbo' WHERE source IS NULL")
+    db.commit()
 
     # Entity ID columns for IC entries (AR/AP need Customer/Vendor refs)
     for col in ["source_debit_entity_id", "source_credit_entity_id",
@@ -2173,21 +2184,99 @@ class ReportParams(BaseModel):
     by_company: Optional[bool] = False  # return per-company breakdown alongside consolidated total
 
 
+async def _manual_company_by_id(company_id: str, org_id: str) -> Optional[dict]:
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT * FROM companies WHERE id = ? AND org_id = ? AND source = 'manual'",
+            (company_id, org_id),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        db.close()
+
+
+def _plaid_period(params) -> tuple:
+    start = params.start_date or "1900-01-01"
+    end = params.end_date or datetime.now().strftime("%Y-%m-%d")
+    return start, end
+
+
+async def _manual_companies_in_org(org_id: str, company_ids_filter: Optional[list] = None) -> list:
+    """Return manual companies visible for org; optionally filter by a list of v2 ids."""
+    db = get_db()
+    try:
+        rows = db.execute(
+            "SELECT id, name, supabase_company_id FROM companies "
+            "WHERE org_id = ? AND source = 'manual' AND supabase_company_id IS NOT NULL",
+            (org_id,),
+        ).fetchall()
+        companies = [dict(r) for r in rows]
+        if company_ids_filter:
+            allowed = set(company_ids_filter)
+            companies = [c for c in companies if c["id"] in allowed]
+        return companies
+    finally:
+        db.close()
+
+
+async def _collect_plaid_reports(
+    org_id: str, report_kind: str, params, company_ids_filter: Optional[list] = None
+) -> list:
+    """Return a list of {company_id, name, report} for manual companies in the org."""
+    manual = await _manual_companies_in_org(org_id, company_ids_filter)
+    out = []
+    start, end = _plaid_period(params)
+    for c in manual:
+        try:
+            if report_kind == "profit_loss":
+                rpt = await _plaid_pl(c["supabase_company_id"], start, end)
+            elif report_kind == "balance_sheet":
+                rpt = await _plaid_balance_sheet(c["supabase_company_id"], end)
+            elif report_kind == "cash_flow":
+                rpt = await _plaid_cash_flow(c["supabase_company_id"], start, end)
+            else:
+                continue
+            out.append({"company_id": c["id"], "name": c["name"], "report": rpt})
+        except Exception as e:
+            logger.warning("Plaid report failed for %s: %s", c["name"], str(e)[:200])
+    return out
+
+
 @app.post("/api/reports/profit-loss")
 async def get_profit_loss(params: ReportParams, authorization: str = Header(None)):
     token = _extract_token(authorization)
     user = get_current_user(token)
     org_id = get_org_id(user)
+
+    # Single manual company → Plaid-sourced report
+    if params.company_id and params.company_id != "all":
+        mc = await _manual_company_by_id(params.company_id, org_id)
+        if mc:
+            start, end = _plaid_period(params)
+            rpt = await _plaid_pl(mc["supabase_company_id"], start, end)
+            return {"current": rpt, "source": "plaid",
+                    "companies": [{"name": mc["name"], "company_id": mc["id"]}]}
+
     if params.company_id == "all":
-        # Always try live first for consolidated to avoid stale/empty cache
         try:
             result = await _get_live_consolidated(params, "ProfitAndLoss", "profit_loss", org_id)
-            if result.get("current") is not None:
-                return result
         except Exception:
-            pass
-        # Fall back to cache
-        return _get_cached_report(params, "profit_loss", org_id)
+            result = None
+        if not result or result.get("current") is None:
+            result = _get_cached_report(params, "profit_loss", org_id)
+        # Append Plaid-sourced reports for manual companies
+        try:
+            plaid_reports = await _collect_plaid_reports(
+                org_id, "profit_loss", params, params.company_ids,
+            )
+            if plaid_reports:
+                result = dict(result or {})
+                result["plaid_reports"] = plaid_reports
+        except Exception as e:
+            logger.info("Plaid consolidated P&L skipped: %s", str(e)[:200])
+        return result
+
     if params.company_id:
         return await _get_live_report_for_company(params, "ProfitAndLoss", "profit_loss")
     return {"current": None, "message": "Select a company"}
@@ -2295,14 +2384,33 @@ async def get_balance_sheet(params: ReportParams, authorization: str = Header(No
     token = _extract_token(authorization)
     user = get_current_user(token)
     org_id = get_org_id(user)
+
+    if params.company_id and params.company_id != "all":
+        mc = await _manual_company_by_id(params.company_id, org_id)
+        if mc:
+            _, end = _plaid_period(params)
+            rpt = await _plaid_balance_sheet(mc["supabase_company_id"], end)
+            return {"current": rpt, "source": "plaid",
+                    "companies": [{"name": mc["name"], "company_id": mc["id"]}]}
+
     if params.company_id == "all":
         try:
             result = await _get_live_consolidated(params, "BalanceSheet", "balance_sheet", org_id)
-            if result.get("current") is not None:
-                return result
         except Exception:
-            pass
-        return _get_cached_report(params, "balance_sheet", org_id)
+            result = None
+        if not result or result.get("current") is None:
+            result = _get_cached_report(params, "balance_sheet", org_id)
+        try:
+            plaid_reports = await _collect_plaid_reports(
+                org_id, "balance_sheet", params, params.company_ids,
+            )
+            if plaid_reports:
+                result = dict(result or {})
+                result["plaid_reports"] = plaid_reports
+        except Exception as e:
+            logger.info("Plaid consolidated BS skipped: %s", str(e)[:200])
+        return result
+
     if params.company_id:
         return await _get_live_report_for_company(params, "BalanceSheet", "balance_sheet")
     return {"current": None, "message": "Select a company"}
@@ -2313,14 +2421,33 @@ async def get_cash_flow(params: ReportParams, authorization: str = Header(None))
     token = _extract_token(authorization)
     user = get_current_user(token)
     org_id = get_org_id(user)
+
+    if params.company_id and params.company_id != "all":
+        mc = await _manual_company_by_id(params.company_id, org_id)
+        if mc:
+            start, end = _plaid_period(params)
+            rpt = await _plaid_cash_flow(mc["supabase_company_id"], start, end)
+            return {"current": rpt, "source": "plaid",
+                    "companies": [{"name": mc["name"], "company_id": mc["id"]}]}
+
     if params.company_id == "all":
         try:
             result = await _get_live_consolidated(params, "CashFlow", "cash_flow", org_id)
-            if result.get("current") is not None:
-                return result
         except Exception:
-            pass
-        return _get_cached_report(params, "cash_flow", org_id)
+            result = None
+        if not result or result.get("current") is None:
+            result = _get_cached_report(params, "cash_flow", org_id)
+        try:
+            plaid_reports = await _collect_plaid_reports(
+                org_id, "cash_flow", params, params.company_ids,
+            )
+            if plaid_reports:
+                result = dict(result or {})
+                result["plaid_reports"] = plaid_reports
+        except Exception as e:
+            logger.info("Plaid consolidated CF skipped: %s", str(e)[:200])
+        return result
+
     if params.company_id:
         return await _get_live_report_for_company(params, "CashFlow", "cash_flow")
     return {"current": None, "message": "Select a company"}
@@ -4977,14 +5104,16 @@ def _build_company_context(org_id: str) -> str:
     """Build a context string with all companies for this org."""
     db = get_db()
     companies = db.execute(
-        "SELECT id, name, status FROM companies WHERE org_id = ? ORDER BY name", (org_id,)
+        "SELECT id, name, status, source FROM companies WHERE org_id = ? ORDER BY name", (org_id,)
     ).fetchall()
     db.close()
     if not companies:
         return "No companies connected yet."
     lines = []
     for c in companies:
-        lines.append(f"- {c['name']} (id: {c['id']}, status: {c['status']})")
+        src = (c["source"] or "qbo").lower()
+        src_label = "QuickBooks" if src == "qbo" else "Manual+Plaid"
+        lines.append(f"- {c['name']} (id: {c['id']}, status: {c['status']}, source: {src_label})")
     return "Connected companies:\n" + "\n".join(lines)
 
 
@@ -5426,6 +5555,1044 @@ Today's date: {today}.
     except Exception as e:
         logger.error("Chat endpoint error: %s", str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
+
+
+# =====================================================================
+#  SUPABASE + PLAID — manual companies with bank-feed reporting
+# =====================================================================
+#
+# Design notes:
+# - v2 mirrors manual companies into Supabase so we can reuse the hub's
+#   Plaid schema (plaid_items with encrypted access tokens, transactions,
+#   chart_of_accounts, categories).
+# - All Supabase access is via the service-role key, which bypasses RLS.
+#   Access control is enforced in this FastAPI layer via user_company_access.
+# - Plaid items are encrypted at rest by a pgcrypto trigger on insert/update.
+#   To read an access token, we call the SECURITY DEFINER RPC
+#   plaid_access_token(item_id uuid).
+# - Reports for manual companies aggregate transactions by
+#   chart_of_accounts.type. Consolidated "all" reports merge QBO (live API)
+#   with manual (Supabase query) data at the account-type level.
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "") or os.environ.get(
+    "SUPABASE_SERVICE_ROLE_KEY", ""
+)
+SUPABASE_SYSTEM_USER_ID = os.environ.get("SUPABASE_SYSTEM_USER_ID", "")
+
+PLAID_CLIENT_ID = os.environ.get("PLAID_CLIENT_ID", "")
+PLAID_SECRET = os.environ.get("PLAID_SECRET", "")
+PLAID_ENV = os.environ.get("PLAID_ENV", "sandbox").lower()
+PLAID_PRODUCTS = [
+    p.strip() for p in os.environ.get("PLAID_PRODUCTS", "transactions").split(",") if p.strip()
+]
+PLAID_COUNTRY_CODES = [
+    c.strip() for c in os.environ.get("PLAID_COUNTRY_CODES", "US").split(",") if c.strip()
+]
+PLAID_WEBHOOK_URL = os.environ.get(
+    "PLAID_WEBHOOK_URL",
+    "https://overflowing-ambition-production-4b7e.up.railway.app/api/plaid/webhook",
+)
+
+_PLAID_HOSTS = {
+    "sandbox": "https://sandbox.plaid.com",
+    "development": "https://development.plaid.com",
+    "production": "https://production.plaid.com",
+}
+
+
+def _plaid_configured() -> bool:
+    return bool(PLAID_CLIENT_ID and PLAID_SECRET and PLAID_ENV in _PLAID_HOSTS)
+
+
+def _plaid_base() -> str:
+    if not _plaid_configured():
+        raise HTTPException(status_code=500, detail="Plaid is not configured")
+    return _PLAID_HOSTS[PLAID_ENV]
+
+
+def _sb_configured() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)
+
+
+def _sb_headers(prefer: Optional[str] = None) -> dict:
+    h = {
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        h["Prefer"] = prefer
+    return h
+
+
+async def _sb_request(method: str, path: str, *, params: Optional[dict] = None,
+                      json_body: Optional[dict] = None, prefer: Optional[str] = None) -> httpx.Response:
+    if not _sb_configured():
+        raise HTTPException(status_code=500, detail="Supabase is not configured")
+    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1{path}"
+    async with httpx.AsyncClient(timeout=60) as client:
+        return await client.request(
+            method, url, headers=_sb_headers(prefer), params=params, json=json_body
+        )
+
+
+async def _sb_insert(table: str, row: dict) -> dict:
+    resp = await _sb_request("POST", f"/{table}", json_body=row, prefer="return=representation")
+    if resp.status_code >= 300:
+        logger.error("Supabase insert %s failed %s: %s", table, resp.status_code, resp.text[:500])
+        raise HTTPException(status_code=502, detail=f"Supabase insert failed ({resp.status_code})")
+    data = resp.json()
+    return data[0] if isinstance(data, list) and data else data
+
+
+async def _sb_upsert(table: str, rows: list, on_conflict: str) -> list:
+    if not rows:
+        return []
+    resp = await _sb_request(
+        "POST", f"/{table}", params={"on_conflict": on_conflict},
+        json_body=rows, prefer="return=representation,resolution=merge-duplicates",
+    )
+    if resp.status_code >= 300:
+        logger.error("Supabase upsert %s failed %s: %s", table, resp.status_code, resp.text[:500])
+        raise HTTPException(status_code=502, detail=f"Supabase upsert failed ({resp.status_code})")
+    return resp.json()
+
+
+async def _sb_select(table: str, params: dict) -> list:
+    resp = await _sb_request("GET", f"/{table}", params=params)
+    if resp.status_code >= 300:
+        logger.error("Supabase select %s failed %s: %s", table, resp.status_code, resp.text[:500])
+        raise HTTPException(status_code=502, detail=f"Supabase select failed ({resp.status_code})")
+    return resp.json()
+
+
+async def _sb_update(table: str, match_params: dict, patch: dict) -> list:
+    resp = await _sb_request(
+        "PATCH", f"/{table}", params=match_params, json_body=patch, prefer="return=representation"
+    )
+    if resp.status_code >= 300:
+        logger.error("Supabase update %s failed %s: %s", table, resp.status_code, resp.text[:500])
+        raise HTTPException(status_code=502, detail=f"Supabase update failed ({resp.status_code})")
+    return resp.json()
+
+
+async def _sb_delete(table: str, match_params: dict) -> None:
+    resp = await _sb_request("DELETE", f"/{table}", params=match_params)
+    if resp.status_code >= 300:
+        logger.error("Supabase delete %s failed %s: %s", table, resp.status_code, resp.text[:500])
+        raise HTTPException(status_code=502, detail=f"Supabase delete failed ({resp.status_code})")
+
+
+async def _sb_rpc(fn_name: str, args: dict) -> any:
+    if not _sb_configured():
+        raise HTTPException(status_code=500, detail="Supabase is not configured")
+    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/rpc/{fn_name}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(url, headers=_sb_headers(), json=args)
+    if resp.status_code >= 300:
+        logger.error("Supabase RPC %s failed %s: %s", fn_name, resp.status_code, resp.text[:500])
+        raise HTTPException(status_code=502, detail=f"Supabase RPC {fn_name} failed ({resp.status_code})")
+    try:
+        return resp.json()
+    except Exception:
+        return resp.text
+
+
+# ---------- Plaid HTTP client (thin wrapper over REST) ----------
+#
+# We deliberately avoid the plaid-python SDK to keep imports light and the
+# surface area small. Plaid's REST API is straightforward: POST /endpoint
+# with {client_id, secret, ...params}. Documented at https://plaid.com/docs/api/
+
+async def _plaid_post(path: str, payload: dict, timeout: int = 30) -> dict:
+    url = f"{_plaid_base()}{path}"
+    body = {"client_id": PLAID_CLIENT_ID, "secret": PLAID_SECRET, **payload}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, json=body, headers={"Content-Type": "application/json"})
+    if resp.status_code >= 300:
+        logger.error("Plaid %s failed %s: %s", path, resp.status_code, resp.text[:500])
+        raise HTTPException(
+            status_code=502,
+            detail=f"Plaid {path} failed: {_plaid_err(resp)}",
+        )
+    return resp.json()
+
+
+def _plaid_err(resp: httpx.Response) -> str:
+    try:
+        j = resp.json()
+        return j.get("error_message") or j.get("error_code") or resp.text[:200]
+    except Exception:
+        return resp.text[:200]
+
+
+# ---------- Plaid PFC → category-name map (port of plaid-pfc-map.ts) ----------
+
+PLAID_PFC_TO_CATEGORY_NAME: dict = {
+    "INCOME":                    "Sales Revenue",
+    "TRANSFER_IN":               None,
+    "TRANSFER_OUT":              None,
+    "LOAN_PAYMENTS":             None,
+    "BANK_FEES":                 "Bank Fees",
+    "ENTERTAINMENT":             "Meals & Entertainment",
+    "FOOD_AND_DRINK":            "Meals & Entertainment",
+    "GENERAL_MERCHANDISE":       "Office Supplies",
+    "HOME_IMPROVEMENT":          "Office Supplies",
+    "MEDICAL":                   "Insurance",
+    "PERSONAL_CARE":             None,
+    "GENERAL_SERVICES":          "Professional Services",
+    "GOVERNMENT_AND_NON_PROFIT": "Uncategorized",
+    "TRANSPORTATION":            "Travel",
+    "TRAVEL":                    "Travel",
+    "RENT_AND_UTILITIES":        "Utilities",
+}
+
+
+def _categorize_by_pfc(plaid_pfc: Optional[str], category_by_name: dict) -> Optional[str]:
+    if not plaid_pfc:
+        return None
+    target = PLAID_PFC_TO_CATEGORY_NAME.get(plaid_pfc)
+    if not target:
+        return None
+    return category_by_name.get(target.lower())
+
+
+# ---------- Rules engine (port of rules/engine.ts) ----------
+
+def _apply_rule_to_tx(tx: dict, rule: dict) -> bool:
+    match = rule.get("match") or {}
+    merchant_q = match.get("merchant")
+    if merchant_q:
+        m = (tx.get("merchant_name") or "") + " " + (tx.get("description") or "")
+        if merchant_q.lower() not in m.lower():
+            return False
+    desc_re = match.get("description_regex")
+    if desc_re:
+        try:
+            if not _re.search(desc_re, tx.get("description") or "", _re.IGNORECASE):
+                return False
+        except Exception:
+            return False
+    amt = abs(float(tx.get("amount") or 0))
+    if match.get("min") is not None and amt < float(match["min"]):
+        return False
+    if match.get("max") is not None and amt > float(match["max"]):
+        return False
+    if match.get("account_id") and tx.get("account_id") != match["account_id"]:
+        return False
+    return True
+
+
+def _apply_rules(tx: dict, rules: list) -> Optional[dict]:
+    """Return the action dict of the first matching rule, or None."""
+    for r in sorted(rules, key=lambda x: (x.get("priority") or 100)):
+        if not r.get("enabled", True):
+            continue
+        if _apply_rule_to_tx(tx, r):
+            return r.get("action") or {}
+    return None
+
+
+# ---------- Transaction sync (port of lib/plaid/sync.ts) ----------
+
+async def _plaid_sync_transactions(sb_item: dict) -> dict:
+    """Sync a single plaid_item. sb_item is the Supabase plaid_items row.
+    Returns a summary {added, modified, removed}."""
+    item_id = sb_item["id"]
+    sb_company_id = sb_item["company_id"]
+
+    # Fetch plaintext access token via encryption RPC
+    access_token = await _sb_rpc("plaid_access_token", {"p_item_id": item_id})
+    if not access_token or not isinstance(access_token, str):
+        raise HTTPException(status_code=500, detail="Could not decrypt Plaid access token")
+
+    # Prepare categorization context: rules + categories lookup
+    categories = await _sb_select(
+        "categories",
+        {"company_id": f"eq.{sb_company_id}", "select": "id,name,coa_account_id"},
+    )
+    category_by_name = {c["name"].lower(): c["id"] for c in categories if c.get("name")}
+
+    rules = await _sb_select(
+        "rules",
+        {"company_id": f"eq.{sb_company_id}", "select": "*", "enabled": "eq.true"},
+    )
+
+    # Fetch accounts to map plaid_account_id → internal account row id
+    accounts = await _sb_select(
+        "accounts",
+        {"company_id": f"eq.{sb_company_id}", "select": "id,plaid_account_id"},
+    )
+    acct_map = {a["plaid_account_id"]: a["id"] for a in accounts if a.get("plaid_account_id")}
+
+    cursor = sb_item.get("cursor")
+    totals = {"added": 0, "modified": 0, "removed": 0}
+    has_more = True
+    iterations = 0
+    while has_more and iterations < 50:  # safety cap
+        iterations += 1
+        payload = {"access_token": access_token}
+        if cursor:
+            payload["cursor"] = cursor
+        page = await _plaid_post("/transactions/sync", payload, timeout=60)
+
+        # ---- added ----
+        rows_to_insert = []
+        for t in page.get("added", []):
+            account_row_id = acct_map.get(t.get("account_id"))
+            if not account_row_id:
+                continue  # new account appeared mid-sync — skip until next sync
+            plaid_pfc = (t.get("personal_finance_category") or {}).get("primary")
+            base_row = {
+                "id": str(uuid.uuid4()),
+                "company_id": sb_company_id,
+                "account_id": account_row_id,
+                "plaid_txn_id": t.get("transaction_id"),
+                "date": t.get("date"),
+                "posted_date": t.get("authorized_date") or t.get("date"),
+                "amount": t.get("amount"),
+                "iso_currency": t.get("iso_currency_code") or "USD",
+                "merchant_name": t.get("merchant_name"),
+                "description": t.get("name"),
+                "pending": t.get("pending", False),
+                "plaid_pfc": plaid_pfc,
+                "is_transfer": False,
+                "categorized_by": None,
+                "category_id": None,
+            }
+            # Rules first, then PFC fallback
+            action = _apply_rules(base_row, rules)
+            if action:
+                if action.get("set_category_id"):
+                    base_row["category_id"] = action["set_category_id"]
+                    base_row["categorized_by"] = "rule"
+                if action.get("mark_transfer"):
+                    base_row["is_transfer"] = True
+                if action.get("set_notes"):
+                    base_row["notes"] = action["set_notes"]
+            if not base_row["category_id"] and not base_row["is_transfer"]:
+                cat = _categorize_by_pfc(plaid_pfc, category_by_name)
+                if cat:
+                    base_row["category_id"] = cat
+                    base_row["categorized_by"] = "plaid"
+            rows_to_insert.append(base_row)
+        if rows_to_insert:
+            # Chunk to avoid huge requests
+            for i in range(0, len(rows_to_insert), 200):
+                await _sb_upsert(
+                    "transactions",
+                    rows_to_insert[i:i + 200],
+                    on_conflict="plaid_txn_id",
+                )
+            totals["added"] += len(rows_to_insert)
+
+        # ---- modified (update Plaid-owned fields only) ----
+        for t in page.get("modified", []):
+            patch = {
+                "amount": t.get("amount"),
+                "date": t.get("date"),
+                "posted_date": t.get("authorized_date") or t.get("date"),
+                "merchant_name": t.get("merchant_name"),
+                "description": t.get("name"),
+                "pending": t.get("pending", False),
+                "plaid_pfc": (t.get("personal_finance_category") or {}).get("primary"),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await _sb_update(
+                "transactions",
+                {"plaid_txn_id": f"eq.{t.get('transaction_id')}"},
+                patch,
+            )
+            totals["modified"] += 1
+
+        # ---- removed ----
+        removed_ids = [r.get("transaction_id") for r in page.get("removed", []) if r.get("transaction_id")]
+        for tid in removed_ids:
+            await _sb_delete("transactions", {"plaid_txn_id": f"eq.{tid}"})
+        totals["removed"] += len(removed_ids)
+
+        cursor = page.get("next_cursor") or cursor
+        has_more = bool(page.get("has_more"))
+
+    # Persist cursor + last_synced_at
+    await _sb_update(
+        "plaid_items", {"id": f"eq.{item_id}"},
+        {
+            "cursor": cursor,
+            "last_synced_at": datetime.now(timezone.utc).isoformat(),
+            "status": "good",
+        },
+    )
+    return totals
+
+
+# ---------- Webhook JWS verification (port of verify-webhook.ts) ----------
+
+_JWK_CACHE: dict = {}  # kid → { key_obj, fetched_at }
+
+
+async def _verify_plaid_webhook(raw_body: bytes, jws_header: str) -> bool:
+    """Verify a Plaid-Verification JWS header against the raw request body.
+    Returns True if valid; False otherwise. Logs the reason on failure."""
+    if not jws_header:
+        logger.warning("Plaid webhook missing Plaid-Verification header")
+        return False
+    try:
+        import jwt
+        from jwt import PyJWKClient  # noqa: F401  (avail via pyjwt[crypto])
+        from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey  # noqa: F401
+    except Exception as e:
+        logger.error("Webhook verification deps missing: %s", str(e))
+        return False
+
+    try:
+        header = jwt.get_unverified_header(jws_header)
+    except Exception as e:
+        logger.warning("Plaid webhook JWS header decode failed: %s", str(e))
+        return False
+
+    kid = header.get("kid")
+    alg = header.get("alg")
+    if alg != "ES256" or not kid:
+        logger.warning("Plaid webhook unexpected alg/kid: %s/%s", alg, kid)
+        return False
+
+    # Fetch or cache the JWK
+    cache_entry = _JWK_CACHE.get(kid)
+    now = datetime.now(timezone.utc)
+    if not cache_entry or (now - cache_entry["fetched_at"]).total_seconds() > 3600:
+        jwk_resp = await _plaid_post("/webhook_verification_key/get", {"key_id": kid})
+        key_data = jwk_resp.get("key")
+        if not key_data:
+            logger.warning("Plaid webhook_verification_key_get returned no key for kid=%s", kid)
+            return False
+        try:
+            from jwt.algorithms import ECAlgorithm
+            key_obj = ECAlgorithm.from_jwk(json.dumps(key_data))
+        except Exception as e:
+            logger.warning("Failed to parse Plaid JWK: %s", str(e))
+            return False
+        _JWK_CACHE[kid] = {"key_obj": key_obj, "fetched_at": now}
+        cache_entry = _JWK_CACHE[kid]
+
+    try:
+        claims = jwt.decode(
+            jws_header, cache_entry["key_obj"], algorithms=["ES256"],
+            options={"verify_aud": False},
+        )
+    except Exception as e:
+        logger.warning("Plaid webhook JWS verification failed: %s", str(e))
+        return False
+
+    # Reject tokens older than 5 minutes
+    iat = claims.get("iat")
+    if not iat or (now.timestamp() - iat) > 300:
+        logger.warning("Plaid webhook token too old or missing iat")
+        return False
+
+    body_hash = claims.get("request_body_sha256")
+    computed = hashlib.sha256(raw_body).hexdigest()
+    if body_hash != computed:
+        logger.warning("Plaid webhook body hash mismatch")
+        return False
+    return True
+
+
+# ---------- Helpers: ensure a company belongs to the user ----------
+
+def _get_manual_company_for_user(company_id: str, user: dict) -> dict:
+    """Raise unless company exists, is accessible, and is source='manual'.
+    Returns the SQLite row as a dict (must have supabase_company_id)."""
+    db = get_db()
+    try:
+        org_id = get_org_id(user)
+        row = db.execute(
+            """SELECT c.* FROM companies c
+                 JOIN user_company_access uca ON uca.company_id = c.id
+                WHERE c.id = ? AND uca.user_id = ? AND c.org_id = ?""",
+            (company_id, user["id"], org_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company not found")
+        d = dict(row)
+        if d.get("source") != "manual":
+            raise HTTPException(status_code=400, detail="Not a manual company")
+        if not d.get("supabase_company_id"):
+            raise HTTPException(status_code=500, detail="Company is missing Supabase mirror")
+        return d
+    finally:
+        db.close()
+
+
+# ---------- Endpoint: create a manual company ----------
+
+class ManualCompanyRequest(BaseModel):
+    name: str
+    legal_name: Optional[str] = None
+    ein: Optional[str] = None
+    fiscal_year_start: Optional[int] = 1  # month 1-12
+    base_currency: Optional[str] = "USD"
+    industry: Optional[str] = None
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+
+
+@app.post("/api/companies/manual")
+async def create_manual_company(
+    body: ManualCompanyRequest,
+    authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    if body.fiscal_year_start and not (1 <= body.fiscal_year_start <= 12):
+        raise HTTPException(status_code=400, detail="fiscal_year_start must be 1-12")
+
+    if not _sb_configured():
+        raise HTTPException(status_code=500, detail="Supabase is not configured")
+    if not SUPABASE_SYSTEM_USER_ID:
+        raise HTTPException(
+            status_code=500,
+            detail="SUPABASE_SYSTEM_USER_ID env var is required for manual companies",
+        )
+
+    # 1) Create in Supabase
+    sb_row = await _sb_insert("companies", {
+        "name": body.name.strip(),
+        "legal_name": body.legal_name,
+        "ein": body.ein,
+        "fiscal_year_start": body.fiscal_year_start or 1,
+        "base_currency": body.base_currency or "USD",
+        "created_by": SUPABASE_SYSTEM_USER_ID,
+    })
+    sb_company_id = sb_row["id"]
+
+    # 2) Seed the default chart of accounts (+ categories via trigger)
+    try:
+        await _sb_rpc("seed_default_coa", {"p_company_id": sb_company_id})
+    except HTTPException as e:
+        # Best-effort: roll back the company if seeding fails
+        logger.error("seed_default_coa failed for %s: %s", sb_company_id, e.detail)
+        await _sb_delete("companies", {"id": f"eq.{sb_company_id}"})
+        raise
+
+    # 3) Mirror into SQLite
+    db = get_db()
+    try:
+        company_id = str(uuid.uuid4())
+        db.execute(
+            """INSERT INTO companies
+                 (id, name, org_id, source, supabase_company_id,
+                  legal_name, ein, fiscal_year_start, base_currency,
+                  industry, address, phone, email, status, created_at)
+               VALUES (?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'))""",
+            (
+                company_id, body.name.strip(), org_id, sb_company_id,
+                body.legal_name, body.ein, body.fiscal_year_start or 1,
+                body.base_currency or "USD",
+                body.industry, body.address, body.phone, body.email,
+            ),
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO user_company_access (id, user_id, company_id) VALUES (?, ?, ?)",
+            (str(uuid.uuid4()), user["id"], company_id),
+        )
+        db.commit()
+        row = db.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone()
+        return {"company": dict(row) if row else None}
+    finally:
+        db.close()
+
+
+# ---------- Endpoint: create a Plaid Link token ----------
+
+class LinkTokenRequest(BaseModel):
+    company_id: str
+
+
+@app.post("/api/plaid/link-token")
+async def create_link_token(
+    body: LinkTokenRequest, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(body.company_id, user)
+
+    payload = {
+        "user": {"client_user_id": f"{user['id']}:{company['supabase_company_id']}"},
+        "client_name": "Consolidated Report",
+        "products": PLAID_PRODUCTS,
+        "country_codes": PLAID_COUNTRY_CODES,
+        "language": "en",
+        "webhook": PLAID_WEBHOOK_URL,
+        "transactions": {"days_requested": 730},
+    }
+    data = await _plaid_post("/link/token/create", payload)
+    return {"link_token": data.get("link_token"), "expiration": data.get("expiration")}
+
+
+# ---------- Endpoint: exchange public token and do initial sync ----------
+
+class ExchangeTokenRequest(BaseModel):
+    public_token: str
+    company_id: str
+    institution_id: Optional[str] = None
+    institution_name: Optional[str] = None
+
+
+@app.post("/api/plaid/exchange-token")
+async def exchange_public_token(
+    body: ExchangeTokenRequest, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(body.company_id, user)
+    sb_company_id = company["supabase_company_id"]
+
+    # 1) Exchange
+    ex = await _plaid_post("/item/public_token/exchange", {"public_token": body.public_token})
+    access_token = ex.get("access_token")
+    plaid_item_id = ex.get("item_id")
+    if not access_token or not plaid_item_id:
+        raise HTTPException(status_code=502, detail="Plaid did not return access token")
+
+    # 2) Insert plaid_items row (pgcrypto trigger encrypts access_token on insert)
+    sb_item = await _sb_insert("plaid_items", {
+        "company_id": sb_company_id,
+        "plaid_item_id": plaid_item_id,
+        "institution_id": body.institution_id,
+        "institution_name": body.institution_name,
+        "access_token": access_token,
+        "status": "good",
+    })
+
+    # 3) Fetch accounts and upsert
+    accounts_resp = await _plaid_post("/accounts/get", {"access_token": access_token})
+    account_rows = []
+    for a in accounts_resp.get("accounts", []):
+        bal = a.get("balances") or {}
+        account_rows.append({
+            "id": str(uuid.uuid4()),
+            "company_id": sb_company_id,
+            "plaid_item_id": sb_item["id"],
+            "plaid_account_id": a.get("account_id"),
+            "name": a.get("name") or "",
+            "official_name": a.get("official_name"),
+            "mask": a.get("mask"),
+            "type": a.get("type"),
+            "subtype": a.get("subtype"),
+            "current_balance": bal.get("current"),
+            "available_balance": bal.get("available"),
+            "currency": bal.get("iso_currency_code") or "USD",
+        })
+    if account_rows:
+        await _sb_upsert("accounts", account_rows, on_conflict="plaid_account_id")
+
+    # 4) Kick off initial transactions sync (best-effort; Plaid needs a minute
+    #    after link before transactions are ready — webhook will also trigger
+    #    a sync when INITIAL_UPDATE / HISTORICAL_UPDATE fire).
+    try:
+        # Re-fetch the item (cursor field may have been set by trigger defaults)
+        fresh = await _sb_select(
+            "plaid_items",
+            {"id": f"eq.{sb_item['id']}", "select": "id,company_id,cursor"},
+        )
+        if fresh:
+            await _plaid_sync_transactions(fresh[0])
+    except Exception as e:
+        logger.info("Initial sync will be retried via webhook: %s", str(e)[:200])
+
+    return {
+        "ok": True,
+        "item": sb_item,
+        "accounts": account_rows,
+    }
+
+
+# ---------- Endpoint: Plaid webhook ----------
+
+@app.post("/api/plaid/webhook")
+async def plaid_webhook(request: Request):
+    raw = await request.body()
+    jws = request.headers.get("plaid-verification") or request.headers.get("Plaid-Verification") or ""
+    ok = await _verify_plaid_webhook(raw, jws)
+    if not ok:
+        raise HTTPException(status_code=401, detail="Invalid Plaid webhook signature")
+
+    try:
+        body = json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    wh_type = body.get("webhook_type")
+    wh_code = body.get("webhook_code")
+    plaid_item_id = body.get("item_id")
+    if not plaid_item_id:
+        return {"ok": True}  # nothing actionable
+
+    items = await _sb_select(
+        "plaid_items",
+        {"plaid_item_id": f"eq.{plaid_item_id}", "select": "id,company_id,cursor,status"},
+    )
+    if not items:
+        logger.info("Plaid webhook for unknown item %s (ignored)", plaid_item_id)
+        return {"ok": True}
+    sb_item = items[0]
+
+    try:
+        if wh_type == "TRANSACTIONS" and wh_code in {
+            "SYNC_UPDATES_AVAILABLE", "DEFAULT_UPDATE",
+            "INITIAL_UPDATE", "HISTORICAL_UPDATE",
+        }:
+            await _plaid_sync_transactions(sb_item)
+        elif wh_type == "ITEM":
+            status_patch = None
+            if wh_code == "ERROR":
+                status_patch = "error"
+            elif wh_code == "LOGIN_REPAIRED":
+                status_patch = "good"
+            elif wh_code == "PENDING_EXPIRATION":
+                status_patch = "login_required"
+            if status_patch:
+                await _sb_update(
+                    "plaid_items", {"id": f"eq.{sb_item['id']}"}, {"status": status_patch},
+                )
+    except Exception as e:
+        logger.error("Plaid webhook handler error: %s", str(e), exc_info=True)
+
+    return {"ok": True}
+
+
+# ---------- Endpoint: manual sync trigger ----------
+
+@app.post("/api/plaid/sync/{company_id}")
+async def manual_sync(company_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+
+    items = await _sb_select(
+        "plaid_items",
+        {"company_id": f"eq.{company['supabase_company_id']}",
+         "select": "id,company_id,cursor,status,plaid_item_id"},
+    )
+    summary = {"items_synced": 0, "totals": {"added": 0, "modified": 0, "removed": 0}}
+    for it in items:
+        try:
+            t = await _plaid_sync_transactions(it)
+            for k in summary["totals"]:
+                summary["totals"][k] += t.get(k, 0)
+            summary["items_synced"] += 1
+        except Exception as e:
+            logger.error("Sync failed for item %s: %s", it["id"], str(e)[:300])
+    return summary
+
+
+# ---------- Endpoint: disconnect a Plaid item ----------
+
+@app.post("/api/plaid/disconnect/{item_id}")
+async def disconnect_item(item_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    items = await _sb_select(
+        "plaid_items", {"id": f"eq.{item_id}", "select": "id,company_id,plaid_item_id"},
+    )
+    if not items:
+        raise HTTPException(status_code=404, detail="Item not found")
+    sb_item = items[0]
+
+    # Confirm the company is accessible to the user
+    db = get_db()
+    try:
+        row = db.execute(
+            """SELECT c.id FROM companies c
+                 JOIN user_company_access uca ON uca.company_id = c.id
+                WHERE c.supabase_company_id = ? AND uca.user_id = ?""",
+            (sb_item["company_id"], user["id"]),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Item not found")
+    finally:
+        db.close()
+
+    # Decrypt, call item/remove, then delete row (cascades)
+    try:
+        access_token = await _sb_rpc("plaid_access_token", {"p_item_id": item_id})
+        if access_token and isinstance(access_token, str):
+            await _plaid_post("/item/remove", {"access_token": access_token})
+    except Exception as e:
+        logger.warning("Plaid /item/remove failed (will still drop row): %s", str(e)[:200])
+
+    await _sb_delete("plaid_items", {"id": f"eq.{item_id}"})
+    return {"ok": True}
+
+
+# ---------- Endpoint: list transactions for a manual company ----------
+
+@app.get("/api/plaid/transactions/{company_id}")
+async def list_plaid_transactions(
+    company_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    uncategorized_only: bool = False,
+    authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    sb_company_id = company["supabase_company_id"]
+
+    limit = max(1, min(int(limit or 100), 500))
+    offset = max(0, int(offset or 0))
+
+    params = {
+        "company_id": f"eq.{sb_company_id}",
+        "select": "id,date,posted_date,amount,merchant_name,description,pending,"
+                   "plaid_pfc,is_transfer,category_id,notes,account_id,categorized_by",
+        "order": "date.desc,created_at.desc",
+        "limit": str(limit),
+        "offset": str(offset),
+    }
+    if start_date:
+        params["date"] = f"gte.{start_date}"
+    if end_date:
+        key = "and" if "date" in params else "date"
+        if key == "and":
+            # Already have a gte filter — combine via PostgREST 'and' syntax
+            params["and"] = f"(date.gte.{start_date},date.lte.{end_date})"
+            params.pop("date", None)
+        else:
+            params["date"] = f"lte.{end_date}"
+    if uncategorized_only:
+        params["category_id"] = "is.null"
+        params["is_transfer"] = "eq.false"
+
+    txs = await _sb_select("transactions", params)
+
+    # Enrich with account + category name for the UI
+    account_ids = list({t["account_id"] for t in txs if t.get("account_id")})
+    category_ids = list({t["category_id"] for t in txs if t.get("category_id")})
+    accounts_map = {}
+    categories_map = {}
+    if account_ids:
+        id_filter = ",".join(account_ids)
+        accs = await _sb_select("accounts", {
+            "id": f"in.({id_filter})", "select": "id,name,mask,type,subtype",
+        })
+        accounts_map = {a["id"]: a for a in accs}
+    if category_ids:
+        id_filter = ",".join(category_ids)
+        cats = await _sb_select("categories", {
+            "id": f"in.({id_filter})", "select": "id,name,coa_account_id",
+        })
+        categories_map = {c["id"]: c for c in cats}
+
+    for t in txs:
+        t["account"] = accounts_map.get(t.get("account_id"))
+        t["category"] = categories_map.get(t.get("category_id"))
+    return {"transactions": txs, "count": len(txs)}
+
+
+# ---------- Endpoint: list accounts for a manual company ----------
+
+@app.get("/api/plaid/accounts/{company_id}")
+async def list_plaid_accounts(company_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+
+    accounts = await _sb_select(
+        "accounts",
+        {"company_id": f"eq.{company['supabase_company_id']}",
+         "select": "id,plaid_item_id,plaid_account_id,name,official_name,mask,"
+                    "type,subtype,current_balance,available_balance,currency"},
+    )
+    items = await _sb_select(
+        "plaid_items",
+        {"company_id": f"eq.{company['supabase_company_id']}",
+         "select": "id,plaid_item_id,institution_id,institution_name,status,last_synced_at"},
+    )
+    return {"accounts": accounts, "items": items}
+
+
+# =====================================================================
+#  REPORTS — Plaid-sourced (for manual companies)
+# =====================================================================
+# Plaid amount convention: positive = outflow (money leaving the account).
+# We flip signs so income appears positive and expense appears positive.
+
+async def _load_plaid_coa_rows(sb_company_id: str) -> dict:
+    """Return a map of coa_account_id → {code, name, type}."""
+    coa = await _sb_select(
+        "chart_of_accounts",
+        {"company_id": f"eq.{sb_company_id}", "is_active": "eq.true",
+         "select": "id,code,name,type"},
+    )
+    return {c["id"]: c for c in coa}
+
+
+async def _sum_plaid_by_coa_type(
+    sb_company_id: str, start_date: str, end_date: str,
+) -> dict:
+    """Return {'income':[{coa_id,name,code,total}], 'expense':[...], 'asset':..., 'liability':..., 'equity':...}."""
+    txs = await _sb_select("transactions", {
+        "company_id": f"eq.{sb_company_id}",
+        "is_transfer": "eq.false",
+        "and": f"(date.gte.{start_date},date.lte.{end_date})",
+        "select": "amount,category_id",
+        "limit": "50000",
+    })
+    cat_ids = list({t["category_id"] for t in txs if t.get("category_id")})
+    cat_to_coa = {}
+    if cat_ids:
+        cats = await _sb_select("categories", {
+            "id": f"in.({','.join(cat_ids)})", "select": "id,coa_account_id",
+        })
+        cat_to_coa = {c["id"]: c.get("coa_account_id") for c in cats}
+
+    coa_map = await _load_plaid_coa_rows(sb_company_id)
+
+    buckets: dict = {"income": {}, "expense": {}, "asset": {}, "liability": {}, "equity": {}}
+    uncategorized_total = 0.0
+    for t in txs:
+        cid = t.get("category_id")
+        coa_id = cat_to_coa.get(cid) if cid else None
+        coa = coa_map.get(coa_id) if coa_id else None
+        if not coa:
+            # uncategorized — assume expense for conservative P&L
+            uncategorized_total += float(t.get("amount") or 0)
+            continue
+        coa_type = coa["type"]
+        if coa_type not in buckets:
+            continue
+        amt = float(t.get("amount") or 0)
+        # Plaid: positive = outflow. For income, outflow is negative income, so flip.
+        if coa_type == "income":
+            amt = -amt  # inflow → positive income
+        # For expense, outflow is positive expense, leave as-is
+        key = coa_id
+        bucket = buckets[coa_type]
+        if key not in bucket:
+            bucket[key] = {"coa_id": coa_id, "code": coa["code"], "name": coa["name"], "total": 0.0}
+        bucket[key]["total"] += amt
+
+    result = {k: list(v.values()) for k, v in buckets.items()}
+    result["uncategorized_expense_total"] = uncategorized_total
+    return result
+
+
+async def _plaid_pl(sb_company_id: str, start_date: str, end_date: str) -> dict:
+    """Return a P&L-shaped dict for a manual company."""
+    buckets = await _sum_plaid_by_coa_type(sb_company_id, start_date, end_date)
+    income_rows = sorted(buckets["income"], key=lambda r: r["code"])
+    expense_rows = sorted(buckets["expense"], key=lambda r: r["code"])
+    total_income = sum(r["total"] for r in income_rows)
+    total_expense = sum(r["total"] for r in expense_rows) + buckets["uncategorized_expense_total"]
+    if buckets["uncategorized_expense_total"]:
+        expense_rows.append({
+            "coa_id": None, "code": "9000", "name": "Uncategorized",
+            "total": buckets["uncategorized_expense_total"],
+        })
+    return {
+        "Header": {"StartPeriod": start_date, "EndPeriod": end_date,
+                   "ReportName": "ProfitAndLoss", "Source": "plaid"},
+        "Rows": {
+            "income": income_rows,
+            "expense": expense_rows,
+            "totals": {
+                "income": round(total_income, 2),
+                "expense": round(total_expense, 2),
+                "net_income": round(total_income - total_expense, 2),
+            },
+        },
+    }
+
+
+async def _plaid_balance_sheet(sb_company_id: str, as_of: str) -> dict:
+    """Bank-account balances + aggregated historical balances by CoA type."""
+    accounts = await _sb_select("accounts", {
+        "company_id": f"eq.{sb_company_id}",
+        "select": "id,name,type,subtype,current_balance,available_balance,currency",
+    })
+    total_cash = sum(float(a.get("current_balance") or 0) for a in accounts
+                     if (a.get("type") or "").lower() in ("depository", "investment"))
+    total_liabilities = sum(float(a.get("current_balance") or 0) for a in accounts
+                            if (a.get("type") or "").lower() in ("credit", "loan"))
+
+    # Historical CoA balances from journal-style aggregation: income - expense per period feeds retained earnings
+    # For a first cut: just show account balances + retained earnings from all-time P&L up to as_of.
+    pl = await _plaid_pl(sb_company_id, "1900-01-01", as_of)
+    retained = pl["Rows"]["totals"]["net_income"]
+
+    return {
+        "Header": {"AsOf": as_of, "ReportName": "BalanceSheet", "Source": "plaid"},
+        "Rows": {
+            "assets": [
+                {"name": a["name"], "total": float(a.get("current_balance") or 0)}
+                for a in accounts if (a.get("type") or "").lower() in ("depository", "investment")
+            ],
+            "liabilities": [
+                {"name": a["name"], "total": float(a.get("current_balance") or 0)}
+                for a in accounts if (a.get("type") or "").lower() in ("credit", "loan")
+            ],
+            "equity": [{"name": "Retained Earnings", "total": round(retained, 2)}],
+            "totals": {
+                "assets": round(total_cash, 2),
+                "liabilities": round(total_liabilities, 2),
+                "equity": round(retained, 2),
+            },
+        },
+    }
+
+
+async def _plaid_cash_flow(sb_company_id: str, start_date: str, end_date: str) -> dict:
+    """Cash in vs cash out by month for the given period."""
+    txs = await _sb_select("transactions", {
+        "company_id": f"eq.{sb_company_id}",
+        "is_transfer": "eq.false",
+        "and": f"(date.gte.{start_date},date.lte.{end_date})",
+        "select": "date,amount",
+        "limit": "50000",
+    })
+    by_month: dict = {}
+    for t in txs:
+        d = (t.get("date") or "")[:7]  # YYYY-MM
+        if not d:
+            continue
+        amt = float(t.get("amount") or 0)
+        inflow = max(0.0, -amt)   # Plaid: negative = inflow
+        outflow = max(0.0, amt)
+        m = by_month.setdefault(d, {"inflow": 0.0, "outflow": 0.0})
+        m["inflow"] += inflow
+        m["outflow"] += outflow
+    months = [
+        {"month": k, "inflow": round(v["inflow"], 2),
+         "outflow": round(v["outflow"], 2),
+         "net": round(v["inflow"] - v["outflow"], 2)}
+        for k, v in sorted(by_month.items())
+    ]
+    total_in = sum(m["inflow"] for m in months)
+    total_out = sum(m["outflow"] for m in months)
+    return {
+        "Header": {"StartPeriod": start_date, "EndPeriod": end_date,
+                   "ReportName": "CashFlow", "Source": "plaid"},
+        "Rows": {
+            "months": months,
+            "totals": {
+                "inflow": round(total_in, 2),
+                "outflow": round(total_out, 2),
+                "net": round(total_in - total_out, 2),
+            },
+        },
+    }
 
 
 # =====================================================================
