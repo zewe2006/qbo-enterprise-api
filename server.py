@@ -1734,17 +1734,93 @@ async def delete_company(company_id: str, authorization: str = Header(None)):
     user = get_current_user(token)
     org_id = get_org_id(user)
     db = get_db()
-    company = db.execute("SELECT id FROM companies WHERE id = ? AND org_id = ?", (company_id, org_id)).fetchone()
+    company = db.execute(
+        "SELECT id, source, supabase_company_id FROM companies WHERE id = ? AND org_id = ?",
+        (company_id, org_id),
+    ).fetchone()
     if not company:
         db.close()
         raise HTTPException(status_code=404, detail="Company not found")
-    db.execute("DELETE FROM company_reports WHERE company_id = ?", (company_id,))
-    db.execute("DELETE FROM company_accounts WHERE company_id = ?", (company_id,))
-    db.execute("DELETE FROM account_mappings WHERE company_id = ?", (company_id,))
-    db.execute("DELETE FROM companies WHERE id = ? AND org_id = ?", (company_id, org_id))
-    db.commit()
+    company_dict = dict(company)
     db.close()
+
+    # For manual+Plaid companies, clean up Supabase + disconnect Plaid items.
+    if company_dict.get("source") == "manual" and company_dict.get("supabase_company_id"):
+        sb_id = company_dict["supabase_company_id"]
+        # 1) Disconnect Plaid items (stops billing + removes access on their side)
+        try:
+            items = await _sb_select("plaid_items", {
+                "company_id": f"eq.{sb_id}", "select": "id,plaid_item_id",
+            })
+            for it in items:
+                try:
+                    access_token = await _sb_rpc("plaid_access_token", {"p_item_id": it["id"]})
+                    if access_token and isinstance(access_token, str):
+                        await _plaid_post("/item/remove", {"access_token": access_token})
+                except Exception as e:
+                    logger.warning("Plaid item/remove failed for %s during company delete: %s",
+                                   it.get("plaid_item_id"), str(e)[:200])
+        except Exception as e:
+            logger.warning("Could not list plaid_items during delete: %s", str(e)[:200])
+
+        # 2) Delete Supabase tables in dependency order. Most have ON DELETE CASCADE
+        #    from companies/plaid_items, so a single delete of the company row
+        #    cascades everything. But we do an explicit tidy for journal_lines
+        #    (linked to journal_entries but also reachable via CoA), then delete
+        #    the company.
+        for table in ["transactions", "rules", "journal_entries",
+                      "categories", "chart_of_accounts", "accounts", "plaid_items"]:
+            try:
+                await _sb_delete(table, {"company_id": f"eq.{sb_id}"})
+            except HTTPException as e:
+                # Log, but don't block the company delete
+                logger.warning("Supabase delete %s failed during company delete: %s",
+                               table, e.detail)
+        try:
+            await _sb_delete("companies", {"id": f"eq.{sb_id}"})
+        except HTTPException as e:
+            logger.warning("Supabase delete companies failed during company delete: %s", e.detail)
+
+    # Delete SQLite rows (regardless of source)
+    db = get_db()
+    try:
+        db.execute("DELETE FROM company_reports WHERE company_id = ?", (company_id,))
+        db.execute("DELETE FROM company_accounts WHERE company_id = ?", (company_id,))
+        db.execute("DELETE FROM account_mappings WHERE company_id = ?", (company_id,))
+        db.execute("DELETE FROM user_company_access WHERE company_id = ?", (company_id,))
+        db.execute("DELETE FROM companies WHERE id = ? AND org_id = ?", (company_id, org_id))
+        db.commit()
+    finally:
+        db.close()
     return {"deleted": company_id}
+
+
+# ---------- Per-account delete ----------
+
+@app.delete("/api/accounts/{account_id}")
+async def delete_account(account_id: str, authorization: str = Header(None)):
+    """Delete a single Plaid-linked bank account from v2's Supabase. Removes
+    the account row AND all of its transactions. Plaid's side is unaffected
+    (the account still exists in Plaid for the parent item)."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    rows = await _sb_select("accounts", {
+        "id": f"eq.{account_id}",
+        "select": "id,company_id,name,mask",
+        "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Account not found")
+    await _resolve_manual_company_from_supabase_id(rows[0]["company_id"], user)
+
+    # Delete transactions first (FK cascade should handle it, but be explicit)
+    try:
+        await _sb_delete("transactions", {"account_id": f"eq.{account_id}"})
+    except HTTPException as e:
+        logger.warning("Account txn delete failed: %s", e.detail)
+    await _sb_delete("accounts", {"id": f"eq.{account_id}"})
+    return {"ok": True}
 
 
 @app.get("/api/companies/{company_id}/accounts")
