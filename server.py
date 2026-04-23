@@ -7675,48 +7675,81 @@ _QBO_TYPE_TO_COA_TYPE = {
 }
 
 
-def _auto_map_qbo_to_coa(qbo_accounts: list, manual_coa: list) -> tuple:
-    """Build a mapping dict from QBO account name (lowercased) → manual CoA id.
-    Returns (name_to_coa_id, unmapped_qbo_names)."""
+_COA_CODE_PREFIX_BY_TYPE = {
+    "asset":     1900,
+    "liability": 2900,
+    "equity":    3900,
+    "income":    4900,
+    "expense":   6900,
+}
+
+
+async def _auto_map_qbo_to_coa(sb_company_id: str, qbo_accounts: list, manual_coa: list) -> tuple:
+    """Build a mapping from QBO account name (lowercased) → manual CoA id.
+    Exact-name matches reuse an existing CoA row. For anything else, CREATE a
+    new CoA row in Supabase so every QBO account has a real destination
+    (instead of collapsing everything into Uncategorized).
+
+    Returns (name_to_coa_id, created_accounts_summary).
+    """
     coa_by_name = {c["name"].lower().strip(): c for c in manual_coa if c.get("is_active", True)}
-    coa_by_code = {c["code"]: c for c in manual_coa if c.get("is_active", True)}
-    # A type-based fallback: for each coa type, pick the first CoA account of that type
-    fallback_by_type: dict = {}
-    for c in manual_coa:
-        if not c.get("is_active", True):
-            continue
-        fallback_by_type.setdefault(c["type"], c)
-    # The seeded "Uncategorized" account (code 9000, type=expense)
-    uncat = coa_by_code.get("9000") or fallback_by_type.get("expense")
+    existing_codes = {c["code"] for c in manual_coa if c.get("code")}
+    # Track next free code per type so we can auto-increment
+    next_code_by_type = dict(_COA_CODE_PREFIX_BY_TYPE)
 
     name_to_coa_id: dict = {}
-    unmapped: list = []
+    created: list = []
+
     for qa in qbo_accounts:
         qname = (qa.get("Name") or "").strip()
         if not qname:
             continue
-        # 1. Exact name match
+        # 1. Exact name match → reuse
         m = coa_by_name.get(qname.lower())
         if m:
             name_to_coa_id[qname.lower()] = m["id"]
             continue
-        # 2. Type-based fallback
+
+        # 2. Otherwise create a new CoA row
         qtype = qa.get("AccountType") or ""
-        coa_type = _QBO_TYPE_TO_COA_TYPE.get(qtype)
-        if coa_type:
-            # Prefer a same-type account with a close name; else the type fallback
-            candidate = fallback_by_type.get(coa_type)
-            if candidate:
-                name_to_coa_id[qname.lower()] = candidate["id"]
-                unmapped.append({"qbo_name": qname, "qbo_type": qtype,
-                                 "mapped_fallback": candidate["name"]})
-                continue
-        # 3. Last resort: Uncategorized
-        if uncat:
-            name_to_coa_id[qname.lower()] = uncat["id"]
-            unmapped.append({"qbo_name": qname, "qbo_type": qtype,
-                             "mapped_fallback": uncat["name"]})
-    return name_to_coa_id, unmapped
+        coa_type = _QBO_TYPE_TO_COA_TYPE.get(qtype) or "expense"
+
+        # Pick a code: prefer QBO's AcctNum if present and unique, else auto-increment
+        code = None
+        acct_num = (qa.get("AcctNum") or "").strip()
+        if acct_num and acct_num not in existing_codes:
+            code = acct_num
+        else:
+            while True:
+                candidate = str(next_code_by_type.get(coa_type, 9000))
+                next_code_by_type[coa_type] = next_code_by_type.get(coa_type, 9000) + 1
+                if candidate not in existing_codes:
+                    code = candidate
+                    break
+
+        try:
+            new_row = await _sb_insert("chart_of_accounts", {
+                "company_id": sb_company_id,
+                "code": code,
+                "name": qname,
+                "type": coa_type,
+                "is_active": True,
+            })
+        except HTTPException as e:
+            logger.warning("CoA create failed for %s (%s): %s", qname, code, e.detail)
+            continue
+
+        existing_codes.add(code)
+        coa_by_name[qname.lower()] = new_row
+        name_to_coa_id[qname.lower()] = new_row["id"]
+        created.append({
+            "qbo_name": qname,
+            "qbo_type": qtype,
+            "coa_code": code,
+            "coa_type": coa_type,
+        })
+
+    return name_to_coa_id, created
 
 
 async def _ensure_qbo_import_placeholder_account(sb_company_id: str, label: str) -> str:
@@ -7867,20 +7900,25 @@ async def import_qbo_to_manual(body: QboImportRequest, authorization: str = Head
         db.close()
     qbo_accounts = qbo_acct_data.get("QueryResponse", {}).get("Account", []) or []
 
-    # 2) Load manual CoA and categories from Supabase
+    # 2) Load manual CoA from Supabase
     manual_coa = await _sb_select("chart_of_accounts", {
         "company_id": f"eq.{sb_company_id}",
         "is_active": "eq.true",
         "select": "id,code,name,type",
     })
+
+    # 3) Build the mapping (auto-creates missing CoA rows)
+    name_to_coa_id, created_accounts = await _auto_map_qbo_to_coa(
+        sb_company_id, qbo_accounts, manual_coa,
+    )
+
+    # 3a) Refresh categories after CoA creation — the CoA→category mirror
+    #     trigger should have populated them, but we query after to be sure.
     categories = await _sb_select("categories", {
         "company_id": f"eq.{sb_company_id}",
         "select": "id,name,coa_account_id",
     })
     cat_by_coa = {c["coa_account_id"]: c["id"] for c in categories if c.get("coa_account_id")}
-
-    # 3) Build the mapping
-    name_to_coa_id, unmapped = _auto_map_qbo_to_coa(qbo_accounts, manual_coa)
 
     # 4) Ensure placeholder account
     placeholder_id = await _ensure_qbo_import_placeholder_account(
@@ -7997,8 +8035,8 @@ async def import_qbo_to_manual(body: QboImportRequest, authorization: str = Head
         **totals,
         "placeholder_account_id": placeholder_id,
         "mapped_account_count": len(name_to_coa_id),
-        "unmapped": unmapped[:50],  # cap response size
-        "unmapped_count": len(unmapped),
+        "created_accounts": created_accounts[:50],  # cap response size
+        "created_accounts_count": len(created_accounts),
         "source_company": src_dict["name"],
         "dest_company": dest_dict["name"],
     }
