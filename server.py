@@ -1541,6 +1541,7 @@ async def list_companies(authorization: str = Header(None)):
         """SELECT id, name, legal_name, qbo_company_id, qbo_realm_id,
                   status, last_synced, created_at, address, phone, email,
                   industry, qbo_plan,
+                  source, supabase_company_id, base_currency, fiscal_year_start, ein,
                   CASE WHEN access_token IS NOT NULL AND access_token != '' THEN 1 ELSE 0 END as has_token
            FROM companies WHERE org_id = ? ORDER BY name""",
         (org_id,),
@@ -6143,6 +6144,7 @@ class ExchangeTokenRequest(BaseModel):
     company_id: str
     institution_id: Optional[str] = None
     institution_name: Optional[str] = None
+    import_start_date: Optional[str] = None  # YYYY-MM-DD; older than sync's default window
 
 
 @app.post("/api/plaid/exchange-token")
@@ -6162,14 +6164,17 @@ async def exchange_public_token(
         raise HTTPException(status_code=502, detail="Plaid did not return access token")
 
     # 2) Insert plaid_items row (pgcrypto trigger encrypts access_token on insert)
-    sb_item = await _sb_insert("plaid_items", {
+    item_row = {
         "company_id": sb_company_id,
         "plaid_item_id": plaid_item_id,
         "institution_id": body.institution_id,
         "institution_name": body.institution_name,
         "access_token": access_token,
         "status": "good",
-    })
+    }
+    if body.import_start_date:
+        item_row["import_start_date"] = body.import_start_date
+    sb_item = await _sb_insert("plaid_items", item_row)
 
     # 3) Fetch accounts and upsert
     accounts_resp = await _plaid_post("/accounts/get", {"access_token": access_token})
@@ -6197,7 +6202,6 @@ async def exchange_public_token(
     #    after link before transactions are ready — webhook will also trigger
     #    a sync when INITIAL_UPDATE / HISTORICAL_UPDATE fire).
     try:
-        # Re-fetch the item (cursor field may have been set by trigger defaults)
         fresh = await _sb_select(
             "plaid_items",
             {"id": f"eq.{sb_item['id']}", "select": "id,company_id,cursor"},
@@ -6207,11 +6211,138 @@ async def exchange_public_token(
     except Exception as e:
         logger.info("Initial sync will be retried via webhook: %s", str(e)[:200])
 
+    # 5) If user asked for an older start date than /transactions/sync can cover,
+    #    page /transactions/get to backfill. Best-effort; failures don't block.
+    if body.import_start_date:
+        try:
+            await _plaid_backfill_history(sb_item["id"], body.import_start_date)
+        except Exception as e:
+            logger.warning("Plaid backfill failed (non-fatal): %s", str(e)[:300])
+
     return {
         "ok": True,
         "item": sb_item,
         "accounts": account_rows,
     }
+
+
+async def _plaid_backfill_history(sb_item_id: str, start_date: str) -> dict:
+    """Page /transactions/get to backfill history older than sync's default window.
+    Upserts on plaid_txn_id so rows already captured by /transactions/sync aren't duplicated,
+    and user category edits are preserved."""
+    items = await _sb_select(
+        "plaid_items",
+        {"id": f"eq.{sb_item_id}", "select": "id,company_id"},
+    )
+    if not items:
+        raise HTTPException(status_code=404, detail="Item not found for backfill")
+    sb_item = items[0]
+    sb_company_id = sb_item["company_id"]
+
+    access_token = await _sb_rpc("plaid_access_token", {"p_item_id": sb_item_id})
+    if not access_token or not isinstance(access_token, str):
+        raise HTTPException(status_code=500, detail="Could not decrypt Plaid access token")
+
+    accounts = await _sb_select(
+        "accounts",
+        {"company_id": f"eq.{sb_company_id}", "select": "id,plaid_account_id"},
+    )
+    acct_map = {a["plaid_account_id"]: a["id"] for a in accounts if a.get("plaid_account_id")}
+
+    categories = await _sb_select(
+        "categories",
+        {"company_id": f"eq.{sb_company_id}", "select": "id,name"},
+    )
+    category_by_name = {c["name"].lower(): c["id"] for c in categories if c.get("name")}
+
+    rules = await _sb_select(
+        "rules",
+        {"company_id": f"eq.{sb_company_id}", "select": "*", "enabled": "eq.true"},
+    )
+
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    offset = 0
+    page_size = 500
+    total_added = 0
+    while True:
+        resp = await _plaid_post(
+            "/transactions/get",
+            {
+                "access_token": access_token,
+                "start_date": start_date,
+                "end_date": end_date,
+                "options": {"count": page_size, "offset": offset},
+            },
+            timeout=90,
+        )
+        txs = resp.get("transactions", [])
+        if not txs:
+            break
+
+        rows_to_insert = []
+        for t in txs:
+            account_row_id = acct_map.get(t.get("account_id"))
+            if not account_row_id:
+                continue
+            plaid_pfc = (t.get("personal_finance_category") or {}).get("primary")
+            base_row = {
+                "id": str(uuid.uuid4()),
+                "company_id": sb_company_id,
+                "account_id": account_row_id,
+                "plaid_txn_id": t.get("transaction_id"),
+                "date": t.get("date"),
+                "posted_date": t.get("authorized_date") or t.get("date"),
+                "amount": t.get("amount"),
+                "iso_currency": t.get("iso_currency_code") or "USD",
+                "merchant_name": t.get("merchant_name"),
+                "description": t.get("name"),
+                "pending": t.get("pending", False),
+                "plaid_pfc": plaid_pfc,
+                "is_transfer": False,
+                "categorized_by": None,
+                "category_id": None,
+            }
+            action = _apply_rules(base_row, rules)
+            if action:
+                if action.get("set_category_id"):
+                    base_row["category_id"] = action["set_category_id"]
+                    base_row["categorized_by"] = "rule"
+                if action.get("mark_transfer"):
+                    base_row["is_transfer"] = True
+                if action.get("set_notes"):
+                    base_row["notes"] = action["set_notes"]
+            if not base_row["category_id"] and not base_row["is_transfer"]:
+                cat = _categorize_by_pfc(plaid_pfc, category_by_name)
+                if cat:
+                    base_row["category_id"] = cat
+                    base_row["categorized_by"] = "plaid"
+            rows_to_insert.append(base_row)
+
+        if rows_to_insert:
+            # Upsert on plaid_txn_id preserves prior sync-written rows (merge-duplicates).
+            # For rows already present, this will overwrite Plaid-owned fields but also
+            # wipe user-set category_id. Prefer ignore-duplicates via a header so existing
+            # rows are untouched — PostgREST supports 'resolution=ignore-duplicates'.
+            resp_headers_prefer = "return=representation,resolution=ignore-duplicates"
+            for i in range(0, len(rows_to_insert), 200):
+                chunk = rows_to_insert[i:i + 200]
+                r = await _sb_request(
+                    "POST", "/transactions",
+                    params={"on_conflict": "plaid_txn_id"},
+                    json_body=chunk,
+                    prefer=resp_headers_prefer,
+                )
+                if r.status_code >= 300:
+                    logger.warning("Backfill upsert chunk failed %s: %s",
+                                   r.status_code, r.text[:300])
+            total_added += len(rows_to_insert)
+
+        total = resp.get("total_transactions", 0) or 0
+        offset += len(txs)
+        if offset >= total:
+            break
+
+    return {"backfilled": total_added, "through": end_date, "from": start_date}
 
 
 # ---------- Endpoint: Plaid webhook ----------
