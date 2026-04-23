@@ -1552,6 +1552,54 @@ async def list_companies(authorization: str = Header(None)):
     if user["role"] != "admin":
         allowed = set(user.get("company_ids", []))
         companies = [c for c in companies if c["id"] in allowed]
+
+    # Hydrate manual companies with their Plaid status (items + account count).
+    # Best-effort: failures here should never break the list response.
+    manual_sb_ids = [c["supabase_company_id"] for c in companies
+                     if c.get("source") == "manual" and c.get("supabase_company_id")]
+    if manual_sb_ids and _sb_configured():
+        try:
+            items = await _sb_select("plaid_items", {
+                "company_id": f"in.({','.join(manual_sb_ids)})",
+                "select": "id,company_id,institution_id,institution_name,status,last_synced_at",
+            })
+            accounts = await _sb_select("accounts", {
+                "company_id": f"in.({','.join(manual_sb_ids)})",
+                "select": "id,plaid_item_id,mask,name,type,current_balance",
+            })
+            items_by_company: dict = {}
+            for it in items:
+                items_by_company.setdefault(it["company_id"], []).append(it)
+            accounts_by_item: dict = {}
+            for a in accounts:
+                if a.get("plaid_item_id"):
+                    accounts_by_item.setdefault(a["plaid_item_id"], []).append(a)
+            for c in companies:
+                sbid = c.get("supabase_company_id")
+                if not sbid:
+                    continue
+                its = items_by_company.get(sbid, [])
+                hydrated = []
+                for it in its:
+                    accts = accounts_by_item.get(it["id"], [])
+                    mask_preview = ""
+                    if accts:
+                        masks = [a.get("mask") for a in accts if a.get("mask")]
+                        if masks:
+                            mask_preview = masks[0]
+                    hydrated.append({
+                        "id": it["id"],
+                        "institution_name": it.get("institution_name"),
+                        "institution_id": it.get("institution_id"),
+                        "status": it.get("status"),
+                        "last_synced_at": it.get("last_synced_at"),
+                        "accounts_count": len(accts),
+                        "mask_preview": mask_preview,
+                    })
+                c["plaid_items"] = hydrated
+        except Exception as e:
+            logger.warning("Company list Plaid hydration failed: %s", str(e)[:200])
+
     return companies
 
 
@@ -6724,6 +6772,814 @@ async def _plaid_cash_flow(sb_company_id: str, start_date: str, end_date: str) -
             },
         },
     }
+
+
+# =====================================================================
+#  V2 PAGES — Transactions, Chart of Accounts, Rules, Journal, Dashboard
+# =====================================================================
+#
+# Per-company resources for manual/Plaid companies. Each endpoint:
+#  1. Authorizes via existing user_company_access check (_get_manual_company_for_user
+#     or a thin resolver that accepts a raw Supabase company id).
+#  2. Reads/writes Supabase via the _sb_* helpers (service-role, bypasses RLS).
+#  3. For QBO companies where the endpoint isn't meaningful (CoA, Rules, Journal),
+#     returns 400. Reports and Transactions still have QBO-native paths elsewhere.
+
+
+async def _resolve_manual_company_from_supabase_id(sb_company_id: str, user: dict) -> dict:
+    """Given a Supabase companies.id, confirm the current user has access via
+    user_company_access in SQLite. Returns the SQLite row (dict) or raises 404."""
+    db = get_db()
+    try:
+        row = db.execute(
+            """SELECT c.* FROM companies c
+                 JOIN user_company_access uca ON uca.company_id = c.id
+                WHERE c.supabase_company_id = ? AND uca.user_id = ?""",
+            (sb_company_id, user["id"]),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company not found")
+        return dict(row)
+    finally:
+        db.close()
+
+
+# ---------- Transactions CRUD ----------
+
+@app.get("/api/transactions/{company_id}")
+async def list_transactions(
+    company_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    search: Optional[str] = None,
+    account_id: Optional[str] = None,
+    category_id: Optional[str] = None,
+    uncategorized_only: bool = False,
+    transfers_only: bool = False,
+    include_transfers: bool = True,
+    sort: str = "date.desc",
+    authorization: str = Header(None),
+):
+    """Supersedes /api/plaid/transactions/{company_id} with richer filters."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    sb_company_id = company["supabase_company_id"]
+
+    limit = max(1, min(int(limit or 100), 500))
+    offset = max(0, int(offset or 0))
+
+    # Build PostgREST query params
+    params: dict = {
+        "company_id": f"eq.{sb_company_id}",
+        "select": "id,date,posted_date,amount,merchant_name,description,pending,plaid_pfc,"
+                   "is_transfer,category_id,notes,account_id,categorized_by,split_parent_id",
+        "limit": str(limit),
+        "offset": str(offset),
+        "order": sort,
+    }
+    and_clauses = []
+    if date_from:
+        and_clauses.append(f"date.gte.{date_from}")
+    if date_to:
+        and_clauses.append(f"date.lte.{date_to}")
+    if account_id:
+        and_clauses.append(f"account_id.eq.{account_id}")
+    if category_id:
+        and_clauses.append(f"category_id.eq.{category_id}")
+    if uncategorized_only:
+        and_clauses.append("category_id.is.null")
+        and_clauses.append("is_transfer.eq.false")
+    elif transfers_only:
+        and_clauses.append("is_transfer.eq.true")
+    elif not include_transfers:
+        and_clauses.append("is_transfer.eq.false")
+    if search:
+        # PostgREST OR syntax: or=(merchant_name.ilike.*xxx*,description.ilike.*xxx*)
+        safe = search.replace("(", "").replace(")", "").replace(",", " ")
+        params["or"] = f"(merchant_name.ilike.*{safe}*,description.ilike.*{safe}*)"
+    if and_clauses:
+        params["and"] = "(" + ",".join(and_clauses) + ")"
+
+    txs = await _sb_select("transactions", params)
+
+    # Hydrate account + category names (single pass for each set)
+    account_ids = list({t["account_id"] for t in txs if t.get("account_id")})
+    category_ids = list({t["category_id"] for t in txs if t.get("category_id")})
+    accounts_map: dict = {}
+    categories_map: dict = {}
+    if account_ids:
+        accs = await _sb_select("accounts", {
+            "id": f"in.({','.join(account_ids)})", "select": "id,name,mask,type,subtype",
+        })
+        accounts_map = {a["id"]: a for a in accs}
+    if category_ids:
+        cats = await _sb_select("categories", {
+            "id": f"in.({','.join(category_ids)})", "select": "id,name,coa_account_id",
+        })
+        categories_map = {c["id"]: c for c in cats}
+
+    for t in txs:
+        t["account"] = accounts_map.get(t.get("account_id"))
+        t["category"] = categories_map.get(t.get("category_id"))
+    return {"transactions": txs, "count": len(txs),
+            "has_more": len(txs) >= limit}
+
+
+class TransactionPatch(BaseModel):
+    category_id: Optional[str] = None
+    is_transfer: Optional[bool] = None
+    notes: Optional[str] = None
+    clear_category: Optional[bool] = False  # if True, set category_id = null
+
+
+@app.patch("/api/transactions/{txn_id}")
+async def patch_transaction(
+    txn_id: str, body: TransactionPatch, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    # Load tx, confirm company access
+    rows = await _sb_select("transactions", {
+        "id": f"eq.{txn_id}", "select": "id,company_id", "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    tx = rows[0]
+    await _resolve_manual_company_from_supabase_id(tx["company_id"], user)
+
+    patch: dict = {"updated_at": datetime.now(timezone.utc).isoformat()}
+    if body.clear_category:
+        patch["category_id"] = None
+        patch["categorized_by"] = None
+    elif body.category_id is not None:
+        patch["category_id"] = body.category_id
+        patch["categorized_by"] = "user"
+    if body.is_transfer is not None:
+        patch["is_transfer"] = body.is_transfer
+        # When marking a transfer, clear category (transfers aren't P&L rows)
+        if body.is_transfer:
+            patch["category_id"] = None
+    if body.notes is not None:
+        patch["notes"] = body.notes
+
+    await _sb_update("transactions", {"id": f"eq.{txn_id}"}, patch)
+    updated = await _sb_select("transactions", {"id": f"eq.{txn_id}", "select": "*", "limit": "1"})
+    return {"transaction": updated[0] if updated else None}
+
+
+class SplitEntry(BaseModel):
+    category_id: Optional[str] = None
+    amount: float
+    notes: Optional[str] = None
+
+
+class SplitTransactionBody(BaseModel):
+    splits: List[SplitEntry]
+
+
+@app.post("/api/transactions/{txn_id}/split")
+async def split_transaction(
+    txn_id: str, body: SplitTransactionBody, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    if not body.splits or len(body.splits) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 splits")
+
+    rows = await _sb_select("transactions", {
+        "id": f"eq.{txn_id}",
+        "select": "id,company_id,account_id,date,amount,merchant_name,description,iso_currency",
+        "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    parent = rows[0]
+    await _resolve_manual_company_from_supabase_id(parent["company_id"], user)
+
+    parent_amt = float(parent.get("amount") or 0)
+    split_total = sum(float(s.amount) for s in body.splits)
+    if abs(split_total - parent_amt) > 0.005:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Splits must sum to {parent_amt:.2f} (got {split_total:.2f})",
+        )
+
+    # Create child rows, mark parent as split (clear its category, keep amount for totals)
+    children = []
+    for s in body.splits:
+        children.append({
+            "id": str(uuid.uuid4()),
+            "company_id": parent["company_id"],
+            "account_id": parent["account_id"],
+            "plaid_txn_id": None,   # child has no Plaid id
+            "split_parent_id": parent["id"],
+            "date": parent["date"],
+            "amount": s.amount,
+            "iso_currency": parent.get("iso_currency") or "USD",
+            "merchant_name": parent.get("merchant_name"),
+            "description": parent.get("description"),
+            "category_id": s.category_id,
+            "categorized_by": "user",
+            "notes": s.notes,
+            "is_transfer": False,
+            "pending": False,
+        })
+    await _sb_insert("transactions", children[0]) if len(children) == 1 else None
+    # Insert all children (Supabase POST accepts an array)
+    resp = await _sb_request("POST", "/transactions", json_body=children,
+                             prefer="return=representation")
+    if resp.status_code >= 300:
+        logger.error("Split insert failed %s: %s", resp.status_code, resp.text[:300])
+        raise HTTPException(status_code=502, detail="Split failed")
+
+    # Null parent category (so it doesn't double-count in P&L)
+    await _sb_update(
+        "transactions", {"id": f"eq.{parent['id']}"},
+        {"category_id": None, "categorized_by": "split_parent",
+         "updated_at": datetime.now(timezone.utc).isoformat()},
+    )
+    return {"ok": True, "children_count": len(children)}
+
+
+@app.delete("/api/transactions/{txn_id}/split")
+async def undo_split(txn_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    rows = await _sb_select("transactions", {
+        "id": f"eq.{txn_id}", "select": "id,company_id,categorized_by", "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    parent = rows[0]
+    await _resolve_manual_company_from_supabase_id(parent["company_id"], user)
+
+    # Delete child rows
+    await _sb_delete("transactions", {"split_parent_id": f"eq.{txn_id}"})
+    # Clear split_parent marker on the parent
+    await _sb_update(
+        "transactions", {"id": f"eq.{txn_id}"},
+        {"categorized_by": None, "updated_at": datetime.now(timezone.utc).isoformat()},
+    )
+    return {"ok": True}
+
+
+# ---------- Chart of Accounts ----------
+
+async def _coa_ytd_totals(sb_company_id: str) -> dict:
+    """Return dict coa_account_id -> ytd total amount. Positive = outflow (expense);
+    for income rows the frontend flips sign."""
+    year_start = f"{datetime.now().year}-01-01"
+    # Aggregate transactions by category → CoA
+    txs = await _sb_select("transactions", {
+        "company_id": f"eq.{sb_company_id}",
+        "is_transfer": "eq.false",
+        "date": f"gte.{year_start}",
+        "select": "amount,category_id",
+        "limit": "50000",
+    })
+    cat_ids = list({t["category_id"] for t in txs if t.get("category_id")})
+    cat_to_coa: dict = {}
+    if cat_ids:
+        cats = await _sb_select("categories", {
+            "id": f"in.({','.join(cat_ids)})", "select": "id,coa_account_id",
+        })
+        cat_to_coa = {c["id"]: c.get("coa_account_id") for c in cats}
+    totals: dict = {}
+    for t in txs:
+        coa_id = cat_to_coa.get(t.get("category_id"))
+        if not coa_id:
+            continue
+        totals[coa_id] = totals.get(coa_id, 0.0) + float(t.get("amount") or 0)
+    return totals
+
+
+@app.get("/api/coa/{company_id}")
+async def list_coa(company_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    sb_company_id = company["supabase_company_id"]
+
+    coa = await _sb_select("chart_of_accounts", {
+        "company_id": f"eq.{sb_company_id}",
+        "select": "id,code,name,type,parent_id,is_active,created_at",
+        "order": "code.asc",
+    })
+    ytd = await _coa_ytd_totals(sb_company_id)
+    for row in coa:
+        row["ytd_activity"] = round(ytd.get(row["id"], 0.0), 2)
+    return {"accounts": coa}
+
+
+class CoACreate(BaseModel):
+    code: str
+    name: str
+    type: str  # asset | liability | equity | income | expense
+    parent_id: Optional[str] = None
+
+
+@app.post("/api/coa/{company_id}")
+async def create_coa(
+    company_id: str, body: CoACreate, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    sb_company_id = company["supabase_company_id"]
+
+    if body.type not in ("asset", "liability", "equity", "income", "expense"):
+        raise HTTPException(status_code=400, detail="Invalid type")
+
+    row = await _sb_insert("chart_of_accounts", {
+        "company_id": sb_company_id,
+        "code": body.code.strip(),
+        "name": body.name.strip(),
+        "type": body.type,
+        "parent_id": body.parent_id,
+        "is_active": True,
+    })
+    return {"account": row}
+
+
+class CoAPatch(BaseModel):
+    code: Optional[str] = None
+    name: Optional[str] = None
+    type: Optional[str] = None
+    parent_id: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+@app.patch("/api/coa/{coa_id}")
+async def patch_coa(
+    coa_id: str, body: CoAPatch, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    rows = await _sb_select("chart_of_accounts", {
+        "id": f"eq.{coa_id}", "select": "id,company_id", "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Account not found")
+    await _resolve_manual_company_from_supabase_id(rows[0]["company_id"], user)
+
+    patch: dict = {}
+    if body.code is not None: patch["code"] = body.code
+    if body.name is not None: patch["name"] = body.name
+    if body.type is not None:
+        if body.type not in ("asset", "liability", "equity", "income", "expense"):
+            raise HTTPException(status_code=400, detail="Invalid type")
+        patch["type"] = body.type
+    if body.parent_id is not None: patch["parent_id"] = body.parent_id or None
+    if body.is_active is not None: patch["is_active"] = body.is_active
+    if not patch:
+        raise HTTPException(status_code=400, detail="No changes")
+
+    updated = await _sb_update("chart_of_accounts", {"id": f"eq.{coa_id}"}, patch)
+    return {"account": updated[0] if updated else None}
+
+
+# ---------- Rules ----------
+
+@app.get("/api/rules/{company_id}")
+async def list_rules(company_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    sb_company_id = company["supabase_company_id"]
+
+    rows = await _sb_select("rules", {
+        "company_id": f"eq.{sb_company_id}",
+        "select": "id,name,priority,match,action,enabled,created_at",
+        "order": "priority.asc,created_at.asc",
+    })
+    return {"rules": rows}
+
+
+class RuleBody(BaseModel):
+    name: str
+    priority: Optional[int] = 100
+    match: dict  # { merchant?: str, description_regex?: str, min?: float, max?: float, account_id?: str }
+    action: dict  # { set_category_id?: str, mark_transfer?: bool, set_notes?: str }
+    enabled: Optional[bool] = True
+
+
+@app.post("/api/rules/{company_id}")
+async def create_rule(
+    company_id: str, body: RuleBody, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+
+    row = await _sb_insert("rules", {
+        "company_id": company["supabase_company_id"],
+        "name": body.name.strip(),
+        "priority": int(body.priority or 100),
+        "match": body.match,
+        "action": body.action,
+        "enabled": bool(body.enabled),
+    })
+    return {"rule": row}
+
+
+@app.patch("/api/rules/{rule_id}")
+async def patch_rule(
+    rule_id: str, body: RuleBody, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    rows = await _sb_select("rules", {
+        "id": f"eq.{rule_id}", "select": "id,company_id", "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    await _resolve_manual_company_from_supabase_id(rows[0]["company_id"], user)
+
+    patch = {
+        "name": body.name.strip(),
+        "priority": int(body.priority or 100),
+        "match": body.match,
+        "action": body.action,
+        "enabled": bool(body.enabled),
+    }
+    updated = await _sb_update("rules", {"id": f"eq.{rule_id}"}, patch)
+    return {"rule": updated[0] if updated else None}
+
+
+@app.delete("/api/rules/{rule_id}")
+async def delete_rule(rule_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    rows = await _sb_select("rules", {
+        "id": f"eq.{rule_id}", "select": "id,company_id", "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    await _resolve_manual_company_from_supabase_id(rows[0]["company_id"], user)
+
+    await _sb_delete("rules", {"id": f"eq.{rule_id}"})
+    return {"ok": True}
+
+
+class RulePreviewBody(BaseModel):
+    company_id: str
+    match: dict
+
+
+@app.post("/api/rules/preview")
+async def preview_rule(body: RulePreviewBody, authorization: str = Header(None)):
+    """Count how many uncategorized transactions this rule would match."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(body.company_id, user)
+
+    # Pull uncategorized txns and evaluate in Python against the match dict
+    txs = await _sb_select("transactions", {
+        "company_id": f"eq.{company['supabase_company_id']}",
+        "category_id": "is.null",
+        "is_transfer": "eq.false",
+        "select": "id,merchant_name,description,amount,account_id",
+        "limit": "5000",
+    })
+    matches = 0
+    for t in txs:
+        if _apply_rule_to_tx(t, {"match": body.match}):
+            matches += 1
+    return {"matches": matches, "scanned": len(txs)}
+
+
+@app.post("/api/rules/{company_id}/recategorize")
+async def recategorize_all(company_id: str, authorization: str = Header(None)):
+    """Re-run rules + PFC fallback across all uncategorized non-transfer transactions."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    sb_company_id = company["supabase_company_id"]
+
+    rules = await _sb_select("rules", {
+        "company_id": f"eq.{sb_company_id}",
+        "enabled": "eq.true", "select": "*", "order": "priority.asc",
+    })
+    categories = await _sb_select("categories", {
+        "company_id": f"eq.{sb_company_id}", "select": "id,name",
+    })
+    category_by_name = {c["name"].lower(): c["id"] for c in categories if c.get("name")}
+
+    txs = await _sb_select("transactions", {
+        "company_id": f"eq.{sb_company_id}",
+        "category_id": "is.null", "is_transfer": "eq.false",
+        "select": "id,merchant_name,description,amount,account_id,plaid_pfc",
+        "limit": "50000",
+    })
+    counts = {"rule": 0, "plaid": 0, "skipped": 0}
+    for t in txs:
+        action = _apply_rules(t, rules)
+        patch = {}
+        if action:
+            if action.get("set_category_id"):
+                patch["category_id"] = action["set_category_id"]
+                patch["categorized_by"] = "rule"
+                counts["rule"] += 1
+            if action.get("mark_transfer"):
+                patch["is_transfer"] = True
+            if action.get("set_notes"):
+                patch["notes"] = action["set_notes"]
+        if not patch.get("category_id"):
+            cat = _categorize_by_pfc(t.get("plaid_pfc"), category_by_name)
+            if cat:
+                patch["category_id"] = cat
+                patch["categorized_by"] = "plaid"
+                counts["plaid"] += 1
+        if patch:
+            patch["updated_at"] = datetime.now(timezone.utc).isoformat()
+            await _sb_update("transactions", {"id": f"eq.{t['id']}"}, patch)
+        else:
+            counts["skipped"] += 1
+    return counts
+
+
+# ---------- Journal Entries ----------
+
+@app.get("/api/journal/{company_id}")
+async def list_journal(company_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    sb_company_id = company["supabase_company_id"]
+
+    entries = await _sb_select("journal_entries", {
+        "company_id": f"eq.{sb_company_id}",
+        "select": "id,date,memo,created_at,created_by",
+        "order": "date.desc,created_at.desc",
+        "limit": "500",
+    })
+    if not entries:
+        return {"entries": []}
+
+    entry_ids = [e["id"] for e in entries]
+    lines = await _sb_select("journal_lines", {
+        "journal_entry_id": f"in.({','.join(entry_ids)})",
+        "select": "id,journal_entry_id,coa_account_id,debit,credit,description",
+    })
+
+    # Enrich CoA
+    coa_ids = list({l["coa_account_id"] for l in lines if l.get("coa_account_id")})
+    coa_map: dict = {}
+    if coa_ids:
+        coa = await _sb_select("chart_of_accounts", {
+            "id": f"in.({','.join(coa_ids)})", "select": "id,code,name,type",
+        })
+        coa_map = {c["id"]: c for c in coa}
+
+    lines_by_entry: dict = {}
+    for l in lines:
+        l["coa"] = coa_map.get(l["coa_account_id"])
+        lines_by_entry.setdefault(l["journal_entry_id"], []).append(l)
+    for e in entries:
+        e["lines"] = lines_by_entry.get(e["id"], [])
+    return {"entries": entries}
+
+
+class JournalLineBody(BaseModel):
+    coa_account_id: str
+    debit: Optional[float] = 0
+    credit: Optional[float] = 0
+    description: Optional[str] = None
+
+
+class JournalEntryBody(BaseModel):
+    date: str  # YYYY-MM-DD
+    memo: Optional[str] = None
+    lines: List[JournalLineBody]
+
+
+@app.post("/api/journal/{company_id}")
+async def create_journal(
+    company_id: str, body: JournalEntryBody, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    sb_company_id = company["supabase_company_id"]
+
+    if len(body.lines) < 2:
+        raise HTTPException(status_code=400, detail="Journal entry needs at least 2 lines")
+    total_debit = sum(float(l.debit or 0) for l in body.lines)
+    total_credit = sum(float(l.credit or 0) for l in body.lines)
+    if abs(total_debit - total_credit) > 0.005:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Debits ({total_debit:.2f}) must equal credits ({total_credit:.2f})",
+        )
+    if total_debit <= 0:
+        raise HTTPException(status_code=400, detail="Entry must have non-zero totals")
+
+    entry = await _sb_insert("journal_entries", {
+        "company_id": sb_company_id,
+        "date": body.date,
+        "memo": body.memo,
+        "created_by": SUPABASE_SYSTEM_USER_ID or None,
+    })
+    # Insert lines in bulk
+    line_rows = []
+    for l in body.lines:
+        line_rows.append({
+            "journal_entry_id": entry["id"],
+            "coa_account_id": l.coa_account_id,
+            "debit": float(l.debit or 0),
+            "credit": float(l.credit or 0),
+            "description": l.description,
+        })
+    resp = await _sb_request(
+        "POST", "/journal_lines", json_body=line_rows,
+        prefer="return=representation",
+    )
+    if resp.status_code >= 300:
+        logger.error("Journal lines insert failed %s: %s", resp.status_code, resp.text[:300])
+        # Roll back the entry
+        await _sb_delete("journal_entries", {"id": f"eq.{entry['id']}"})
+        raise HTTPException(status_code=502, detail="Failed to save journal lines")
+    return {"entry": entry, "lines_count": len(line_rows)}
+
+
+@app.delete("/api/journal/{entry_id}")
+async def delete_journal(entry_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    rows = await _sb_select("journal_entries", {
+        "id": f"eq.{entry_id}", "select": "id,company_id", "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Journal entry not found")
+    await _resolve_manual_company_from_supabase_id(rows[0]["company_id"], user)
+
+    # Lines cascade via FK ON DELETE CASCADE (from the Supabase schema)
+    await _sb_delete("journal_entries", {"id": f"eq.{entry_id}"})
+    return {"ok": True}
+
+
+# ---------- Bank Accounts (CoA mapping) + backfill ----------
+
+class AccountPatch(BaseModel):
+    coa_account_id: Optional[str] = None
+
+
+@app.patch("/api/accounts/{account_id}")
+async def patch_account(
+    account_id: str, body: AccountPatch, authorization: str = Header(None),
+):
+    """Update the CoA mapping for a Plaid-linked bank account."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    rows = await _sb_select("accounts", {
+        "id": f"eq.{account_id}", "select": "id,company_id", "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Account not found")
+    await _resolve_manual_company_from_supabase_id(rows[0]["company_id"], user)
+
+    patch: dict = {}
+    if body.coa_account_id is not None:
+        patch["coa_account_id"] = body.coa_account_id or None
+    if not patch:
+        raise HTTPException(status_code=400, detail="No changes")
+    updated = await _sb_update("accounts", {"id": f"eq.{account_id}"}, patch)
+    return {"account": updated[0] if updated else None}
+
+
+class BackfillBody(BaseModel):
+    start_date: str  # YYYY-MM-DD
+
+
+@app.post("/api/plaid/backfill/{item_id}")
+async def plaid_backfill(
+    item_id: str, body: BackfillBody, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    rows = await _sb_select("plaid_items", {
+        "id": f"eq.{item_id}", "select": "id,company_id", "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Item not found")
+    await _resolve_manual_company_from_supabase_id(rows[0]["company_id"], user)
+
+    # Also update plaid_items.import_start_date for visibility
+    await _sb_update("plaid_items", {"id": f"eq.{item_id}"},
+                     {"import_start_date": body.start_date})
+    result = await _plaid_backfill_history(item_id, body.start_date)
+    return result
+
+
+# ---------- Dashboard ----------
+
+@app.get("/api/dashboard/{company_id}")
+async def get_company_dashboard(company_id: str, authorization: str = Header(None)):
+    """Aggregated per-company dashboard widgets. Plaid-source only for now."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    sb_company_id = company["supabase_company_id"]
+
+    today = datetime.now().date()
+    year_start = today.replace(month=1, day=1).isoformat()
+    twelve_months_ago = (today.replace(day=1) - timedelta(days=365)).replace(day=1).isoformat()
+
+    # Accounts for "Cash on hand"
+    accounts = await _sb_select("accounts", {
+        "company_id": f"eq.{sb_company_id}",
+        "select": "id,name,type,subtype,mask,current_balance",
+    })
+    cash_on_hand = sum(float(a.get("current_balance") or 0) for a in accounts
+                       if (a.get("type") or "").lower() in ("depository",))
+
+    # YTD P&L
+    ytd_pl = await _plaid_pl(sb_company_id, year_start, today.isoformat())
+    ytd_revenue = ytd_pl["Rows"]["totals"]["income"]
+    ytd_expense = ytd_pl["Rows"]["totals"]["expense"]
+    ytd_net     = ytd_pl["Rows"]["totals"]["net_income"]
+
+    # 12-month trend: monthly net income
+    trend_cf = await _plaid_cash_flow(sb_company_id, twelve_months_ago, today.isoformat())
+    months = trend_cf["Rows"]["months"]
+
+    # Top 5 expense categories from YTD
+    top_expenses = sorted(ytd_pl["Rows"]["expense"], key=lambda r: r.get("total", 0), reverse=True)[:5]
+
+    # Uncategorized count
+    uncats = await _sb_select("transactions", {
+        "company_id": f"eq.{sb_company_id}",
+        "category_id": "is.null", "is_transfer": "eq.false",
+        "select": "id", "limit": "1001",
+    })
+    uncat_count = len(uncats)
+
+    # Recent 10 transactions
+    recent = await _sb_select("transactions", {
+        "company_id": f"eq.{sb_company_id}",
+        "select": "id,date,amount,merchant_name,description,category_id",
+        "order": "date.desc,created_at.desc",
+        "limit": "10",
+    })
+
+    return {
+        "company": {"id": company["id"], "name": company["name"], "source": company["source"]},
+        "kpi": {
+            "cash_on_hand": round(cash_on_hand, 2),
+            "ytd_revenue":  round(ytd_revenue, 2),
+            "ytd_expense":  round(ytd_expense, 2),
+            "ytd_net":      round(ytd_net, 2),
+        },
+        "trend_months": months,
+        "top_expenses": top_expenses,
+        "uncategorized_count": uncat_count,
+        "accounts": accounts,
+        "recent_transactions": recent,
+    }
+
+
+# ---------- Categories list (for inline pickers) ----------
+
+@app.get("/api/categories/{company_id}")
+async def list_categories(company_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    sb_company_id = company["supabase_company_id"]
+
+    # Categories are auto-mirrored from CoA. Join to CoA for type info.
+    cats = await _sb_select("categories", {
+        "company_id": f"eq.{sb_company_id}",
+        "select": "id,name,coa_account_id,parent_id",
+        "order": "name.asc",
+    })
+    coa_ids = list({c["coa_account_id"] for c in cats if c.get("coa_account_id")})
+    coa_map: dict = {}
+    if coa_ids:
+        coa = await _sb_select("chart_of_accounts", {
+            "id": f"in.({','.join(coa_ids)})",
+            "is_active": "eq.true",
+            "select": "id,code,type",
+        })
+        coa_map = {c["id"]: c for c in coa}
+    for c in cats:
+        coa = coa_map.get(c.get("coa_account_id"))
+        c["type"] = coa.get("type") if coa else None
+        c["code"] = coa.get("code") if coa else None
+    # Drop categories whose CoA was archived
+    cats = [c for c in cats if c["type"]]
+    return {"categories": cats}
 
 
 # =====================================================================
