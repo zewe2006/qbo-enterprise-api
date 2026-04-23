@@ -35,14 +35,15 @@ import requests
 
 
 COMPANY_ALIASES = {
-    # Spreadsheet label → QBO company name (as it appears in /api/companies)
-    "SHG": "Sweet Hut Group",
-    "Duluth": "Sweet Hut Duluth",
-    "Central": "Sweet Hut Kitchen",
-    "Ewe Group": "Sweet Hut Doraville",
-    "Texas": "Sweet Hut Plano",
-    "FT2": "Food Terminal West Midtown",
-    "Farm Noodle": "Farm Noodle",
+    # Spreadsheet label → QBO company name OR legal_name.
+    # Matcher checks both (case-insensitive).
+    "SHG":         "Sweet Hut Group LLC",
+    "Duluth":      "Sweet Hut Pleasant Hill",
+    "Central":     "Sweet Hut Kitchen",
+    "Ewe Group":   "Sweet Hut Doraville",
+    "Texas":       "Sweet Hut Texas",
+    "FT2":         "Food Terminal (West Midtown)",
+    "Farm Noodle": "FARM NOODLE INC.",   # matches on legal_name (display name is "Food Terminal")
 }
 
 # Shareholder name aliases — left is what the spreadsheet says, right is
@@ -167,8 +168,12 @@ class Client:
 
 def _match_company(companies: list, label: str):
     wanted = (COMPANY_ALIASES.get(label) or label).strip().lower()
+    if not wanted:
+        return None
     for c in companies:
         if (c.get("name") or "").strip().lower() == wanted:
+            return c
+        if (c.get("legal_name") or "").strip().lower() == wanted:
             return c
     return None
 
