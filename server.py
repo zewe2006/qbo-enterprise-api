@@ -752,6 +752,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         FRONTEND_ORIGIN,
+        "https://consolidatedreport.app",
+        "https://v2.consolidatedreport.app",
+        "https://hub.consolidatedreport.app",
         "http://localhost:3000",
         "http://localhost:8000",
     ],
