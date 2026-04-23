@@ -6815,6 +6815,7 @@ async def list_transactions(
     date_to: Optional[str] = None,
     search: Optional[str] = None,
     account_id: Optional[str] = None,
+    plaid_item_id: Optional[str] = None,
     category_id: Optional[str] = None,
     uncategorized_only: bool = False,
     transfers_only: bool = False,
@@ -6830,6 +6831,19 @@ async def list_transactions(
 
     limit = max(1, min(int(limit or 100), 500))
     offset = max(0, int(offset or 0))
+
+    # If a plaid_item_id was passed, expand to all account ids under that bank.
+    account_ids_filter = None
+    if plaid_item_id:
+        bank_accts = await _sb_select("accounts", {
+            "plaid_item_id": f"eq.{plaid_item_id}",
+            "company_id": f"eq.{sb_company_id}",
+            "select": "id",
+        })
+        account_ids_filter = [a["id"] for a in bank_accts]
+        if not account_ids_filter:
+            # Bank has no accounts (shouldn't normally happen) — return empty set
+            return {"transactions": [], "count": 0, "has_more": False}
 
     # Build PostgREST query params
     params: dict = {
@@ -6847,6 +6861,8 @@ async def list_transactions(
         and_clauses.append(f"date.lte.{date_to}")
     if account_id:
         and_clauses.append(f"account_id.eq.{account_id}")
+    elif account_ids_filter:
+        and_clauses.append(f"account_id.in.({','.join(account_ids_filter)})")
     if category_id:
         and_clauses.append(f"category_id.eq.{category_id}")
     if uncategorized_only:
