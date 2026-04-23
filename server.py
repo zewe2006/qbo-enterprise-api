@@ -7641,6 +7641,369 @@ async def get_company_dashboard(company_id: str, authorization: str = Header(Non
     }
 
 
+# ---------- QBO → Manual Company bulk import ----------
+#
+# Pulls every journal line from QBO's GeneralLedger report for a date range,
+# auto-maps QBO accounts to the manual company's chart of accounts, and writes
+# the transactions into Supabase under a synthetic "QBO Import" placeholder
+# account. Idempotent via a synthetic plaid_txn_id of the form
+# "qbo:{src_company_id}:{month}:{row_idx}" so rerunning is safe.
+
+
+# QBO AccountType → manual CoA type fallback mapping
+_QBO_TYPE_TO_COA_TYPE = {
+    # Assets
+    "Bank": "asset",
+    "Accounts Receivable": "asset",
+    "Other Current Asset": "asset",
+    "Fixed Asset": "asset",
+    "Other Asset": "asset",
+    # Liabilities
+    "Accounts Payable": "liability",
+    "Credit Card": "liability",
+    "Other Current Liability": "liability",
+    "Long Term Liability": "liability",
+    # Equity
+    "Equity": "equity",
+    # Income
+    "Income": "income",
+    "Other Income": "income",
+    # Expense
+    "Expense": "expense",
+    "Other Expense": "expense",
+    "Cost of Goods Sold": "expense",
+}
+
+
+def _auto_map_qbo_to_coa(qbo_accounts: list, manual_coa: list) -> tuple:
+    """Build a mapping dict from QBO account name (lowercased) → manual CoA id.
+    Returns (name_to_coa_id, unmapped_qbo_names)."""
+    coa_by_name = {c["name"].lower().strip(): c for c in manual_coa if c.get("is_active", True)}
+    coa_by_code = {c["code"]: c for c in manual_coa if c.get("is_active", True)}
+    # A type-based fallback: for each coa type, pick the first CoA account of that type
+    fallback_by_type: dict = {}
+    for c in manual_coa:
+        if not c.get("is_active", True):
+            continue
+        fallback_by_type.setdefault(c["type"], c)
+    # The seeded "Uncategorized" account (code 9000, type=expense)
+    uncat = coa_by_code.get("9000") or fallback_by_type.get("expense")
+
+    name_to_coa_id: dict = {}
+    unmapped: list = []
+    for qa in qbo_accounts:
+        qname = (qa.get("Name") or "").strip()
+        if not qname:
+            continue
+        # 1. Exact name match
+        m = coa_by_name.get(qname.lower())
+        if m:
+            name_to_coa_id[qname.lower()] = m["id"]
+            continue
+        # 2. Type-based fallback
+        qtype = qa.get("AccountType") or ""
+        coa_type = _QBO_TYPE_TO_COA_TYPE.get(qtype)
+        if coa_type:
+            # Prefer a same-type account with a close name; else the type fallback
+            candidate = fallback_by_type.get(coa_type)
+            if candidate:
+                name_to_coa_id[qname.lower()] = candidate["id"]
+                unmapped.append({"qbo_name": qname, "qbo_type": qtype,
+                                 "mapped_fallback": candidate["name"]})
+                continue
+        # 3. Last resort: Uncategorized
+        if uncat:
+            name_to_coa_id[qname.lower()] = uncat["id"]
+            unmapped.append({"qbo_name": qname, "qbo_type": qtype,
+                             "mapped_fallback": uncat["name"]})
+    return name_to_coa_id, unmapped
+
+
+async def _ensure_qbo_import_placeholder_account(sb_company_id: str, label: str) -> str:
+    """Ensure a synthetic accounts row exists for QBO-imported transactions.
+    Returns the account id."""
+    name = f"QBO Import · {label}"
+    existing = await _sb_select("accounts", {
+        "company_id": f"eq.{sb_company_id}",
+        "name": f"eq.{name}",
+        "select": "id", "limit": "1",
+    })
+    if existing:
+        return existing[0]["id"]
+    row = await _sb_insert("accounts", {
+        "id": str(uuid.uuid4()),
+        "company_id": sb_company_id,
+        "plaid_item_id": None,
+        "plaid_account_id": None,
+        "name": name,
+        "official_name": name,
+        "type": "depository",
+        "subtype": "imported",
+        "currency": "USD",
+        "current_balance": 0,
+        "available_balance": 0,
+    })
+    return row["id"]
+
+
+def _parse_gl_for_import(report: dict) -> list:
+    """Walk a QBO GeneralLedger report and return flat rows with the section's
+    account name attached. Each row: {date, txn_type, doc_num, name, memo,
+    account_name, debit, credit, amount}."""
+    out: list = []
+    if not report:
+        return out
+    columns = []
+    for c in report.get("Columns", {}).get("Column", []):
+        # Prefer machine-readable ColType; fall back to ColTitle
+        col_type = (c.get("ColType") or c.get("ColTitle") or "").strip()
+        columns.append(col_type.lower())
+
+    def walk(rows_obj, current_account=""):
+        for row in rows_obj.get("Row", []):
+            row_type = row.get("type", "")
+            if row_type == "Section" or row.get("Header"):
+                header_cols = (row.get("Header") or {}).get("ColData", [])
+                section_name = header_cols[0].get("value", "") if header_cols else ""
+                next_acct = section_name or current_account
+                nested = row.get("Rows", {})
+                if nested:
+                    walk(nested, current_account=next_acct)
+            else:
+                if row.get("ColData"):
+                    txn = {"account_name": current_account}
+                    for i, cd in enumerate(row["ColData"]):
+                        key = columns[i] if i < len(columns) else f"col_{i}"
+                        # Normalize keys we care about
+                        val = cd.get("value", "")
+                        txn[key] = val
+                    out.append(txn)
+                if row.get("Rows"):
+                    walk(row["Rows"], current_account=current_account)
+
+    walk(report.get("Rows", {}))
+    return out
+
+
+def _month_range(start_date: str, end_date: str) -> list:
+    """Return a list of (month_start, month_end) tuples spanning start..end inclusive."""
+    try:
+        start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid date format, use YYYY-MM-DD")
+    if end < start:
+        raise HTTPException(status_code=400, detail="end_date is before start_date")
+
+    out = []
+    cur = start.replace(day=1)
+    while cur <= end:
+        last_day = calendar.monthrange(cur.year, cur.month)[1]
+        month_end = cur.replace(day=last_day)
+        out.append((
+            max(cur, start).strftime("%Y-%m-%d"),
+            min(month_end, end).strftime("%Y-%m-%d"),
+        ))
+        # advance to next month
+        if cur.month == 12:
+            cur = cur.replace(year=cur.year + 1, month=1)
+        else:
+            cur = cur.replace(month=cur.month + 1)
+    return out
+
+
+class QboImportRequest(BaseModel):
+    source_qbo_company_id: str
+    dest_manual_company_id: str
+    start_date: str  # YYYY-MM-DD
+    end_date: str
+    accounting_method: Optional[str] = "Accrual"
+
+
+@app.post("/api/import/qbo-to-manual")
+async def import_qbo_to_manual(body: QboImportRequest, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+
+    db = get_db()
+    try:
+        src = db.execute(
+            "SELECT id, name, source, qbo_realm_id, refresh_token FROM companies "
+            "WHERE id = ? AND org_id = ? AND source = 'qbo'",
+            (body.source_qbo_company_id, org_id),
+        ).fetchone()
+        if not src:
+            raise HTTPException(status_code=404, detail="Source QBO company not found")
+        if not src["refresh_token"]:
+            raise HTTPException(status_code=400, detail="Source QBO company is not connected")
+
+        dest = db.execute(
+            "SELECT id, name, source, supabase_company_id FROM companies "
+            "WHERE id = ? AND org_id = ? AND source = 'manual'",
+            (body.dest_manual_company_id, org_id),
+        ).fetchone()
+        if not dest:
+            raise HTTPException(status_code=404, detail="Destination manual company not found")
+        if not dest["supabase_company_id"]:
+            raise HTTPException(status_code=500, detail="Destination company is missing Supabase mirror")
+
+        src_dict = dict(src)
+        dest_dict = dict(dest)
+    finally:
+        db.close()
+
+    sb_company_id = dest_dict["supabase_company_id"]
+
+    # 1) Load QBO accounts (source of truth for the mapping)
+    db = get_db()
+    try:
+        qbo_acct_data = await qbo_query(
+            db, src_dict["id"],
+            "SELECT Id, Name, AccountType, AccountSubType, Classification FROM Account "
+            "WHERE Active = true MAXRESULTS 1000",
+        )
+    finally:
+        db.close()
+    qbo_accounts = qbo_acct_data.get("QueryResponse", {}).get("Account", []) or []
+
+    # 2) Load manual CoA and categories from Supabase
+    manual_coa = await _sb_select("chart_of_accounts", {
+        "company_id": f"eq.{sb_company_id}",
+        "is_active": "eq.true",
+        "select": "id,code,name,type",
+    })
+    categories = await _sb_select("categories", {
+        "company_id": f"eq.{sb_company_id}",
+        "select": "id,name,coa_account_id",
+    })
+    cat_by_coa = {c["coa_account_id"]: c["id"] for c in categories if c.get("coa_account_id")}
+
+    # 3) Build the mapping
+    name_to_coa_id, unmapped = _auto_map_qbo_to_coa(qbo_accounts, manual_coa)
+
+    # 4) Ensure placeholder account
+    placeholder_id = await _ensure_qbo_import_placeholder_account(
+        sb_company_id, src_dict["name"],
+    )
+
+    # 5) For each month chunk, pull GL and upsert
+    months = _month_range(body.start_date, body.end_date)
+    totals = {"imported": 0, "skipped": 0, "months_processed": 0}
+    db = get_db()
+    try:
+        for (m_start, m_end) in months:
+            try:
+                report = await qbo_get_report(db, src_dict["id"], "GeneralLedger", {
+                    "start_date": m_start,
+                    "end_date": m_end,
+                    "accounting_method": body.accounting_method or "Accrual",
+                    "columns": "tx_date,txn_type,doc_num,name,memo,account_name,debt_amt,credit_amt",
+                })
+            except HTTPException as e:
+                logger.warning("QBO GL fetch failed for %s..%s: %s", m_start, m_end, e.detail)
+                continue
+            except Exception as e:
+                logger.warning("QBO GL fetch error for %s..%s: %s", m_start, m_end, str(e)[:200])
+                continue
+
+            rows = _parse_gl_for_import(report)
+            batch: list = []
+            for idx, r in enumerate(rows):
+                acct_name = (r.get("account_name") or "").strip()
+                if not acct_name:
+                    totals["skipped"] += 1
+                    continue
+                coa_id = name_to_coa_id.get(acct_name.lower())
+                category_id = cat_by_coa.get(coa_id) if coa_id else None
+
+                # QBO GL column keys: look for common names
+                def _num(d, *keys):
+                    for k in keys:
+                        v = d.get(k)
+                        if v is None:
+                            continue
+                        try:
+                            return float(v)
+                        except Exception:
+                            try:
+                                return float(str(v).replace(",", "").replace("$", ""))
+                            except Exception:
+                                continue
+                    return 0.0
+
+                debit = _num(r, "debit", "debt_amt", "debit_amt")
+                credit = _num(r, "credit", "credit_amt")
+                if debit == 0.0 and credit == 0.0:
+                    # Nothing posted — skip summary/rolling rows
+                    totals["skipped"] += 1
+                    continue
+
+                date_str = r.get("date") or r.get("tx_date")
+                if not date_str:
+                    totals["skipped"] += 1
+                    continue
+
+                # Plaid convention: positive = outflow; amount = debit - credit
+                amount = round(debit - credit, 2)
+
+                # Synthetic stable id. Include account_name so the same GL row
+                # appearing under two account sections (shouldn't happen but safe)
+                # gets distinct ids.
+                tx_id = f"qbo:{src_dict['id']}:{m_start}:{idx}:{acct_name[:40]}"
+                # The plaid_txn_id column has UNIQUE constraint across the whole
+                # transactions table. To keep rerun idempotent we include company.
+                plaid_txn_id = tx_id
+
+                row = {
+                    "id": str(uuid.uuid4()),
+                    "company_id": sb_company_id,
+                    "account_id": placeholder_id,
+                    "plaid_txn_id": plaid_txn_id,
+                    "date": date_str,
+                    "posted_date": date_str,
+                    "amount": amount,
+                    "iso_currency": "USD",
+                    "merchant_name": (r.get("name") or "")[:200] or None,
+                    "description": (r.get("memo") or r.get("txn_type") or "")[:500] or None,
+                    "pending": False,
+                    "plaid_pfc": None,
+                    "is_transfer": False,
+                    "categorized_by": "qbo_import" if category_id else None,
+                    "category_id": category_id,
+                    "notes": None,
+                }
+                batch.append(row)
+
+            # Upsert in chunks of 200
+            for i in range(0, len(batch), 200):
+                chunk = batch[i:i + 200]
+                resp = await _sb_request(
+                    "POST", "/transactions",
+                    params={"on_conflict": "plaid_txn_id"},
+                    json_body=chunk,
+                    prefer="return=minimal,resolution=merge-duplicates",
+                )
+                if resp.status_code >= 300:
+                    logger.warning("QBO import upsert chunk failed %s: %s",
+                                   resp.status_code, resp.text[:300])
+                else:
+                    totals["imported"] += len(chunk)
+            totals["months_processed"] += 1
+    finally:
+        db.close()
+
+    return {
+        **totals,
+        "placeholder_account_id": placeholder_id,
+        "mapped_account_count": len(name_to_coa_id),
+        "unmapped": unmapped[:50],  # cap response size
+        "unmapped_count": len(unmapped),
+        "source_company": src_dict["name"],
+        "dest_company": dest_dict["name"],
+    }
+
+
 # ---------- Categories list (for inline pickers) ----------
 
 @app.get("/api/categories/{company_id}")
