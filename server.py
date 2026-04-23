@@ -296,6 +296,62 @@ def init_db():
             created_by TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS shareholders (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            short_name TEXT,
+            active INTEGER NOT NULL DEFAULT 1,
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_shareholders_org_name
+            ON shareholders(org_id, lower(display_name));
+        CREATE TABLE IF NOT EXISTS shareholder_account_links (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL,
+            shareholder_id TEXT NOT NULL,
+            company_id TEXT NOT NULL,
+            qbo_account_id TEXT NOT NULL,
+            qbo_account_name TEXT NOT NULL,
+            account_kind TEXT NOT NULL CHECK (account_kind IN ('drawing','dividend_payable')),
+            is_default_for_writes INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (company_id, qbo_account_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_sal_shareholder_company
+            ON shareholder_account_links(shareholder_id, company_id);
+        CREATE TABLE IF NOT EXISTS shareholder_dividend_events (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL,
+            shareholder_id TEXT NOT NULL,
+            company_id TEXT NOT NULL,
+            event_date TEXT NOT NULL,
+            amount REAL NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'payment'
+                CHECK (kind IN ('payment','declaration','adjustment')),
+            drawing_account_name TEXT,
+            cash_account_name TEXT,
+            memo TEXT,
+            source TEXT NOT NULL DEFAULT 'manual'
+                CHECK (source IN ('manual','import','sync')),
+            qbo_je_id TEXT,
+            qbo_post_status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (qbo_post_status IN ('pending','posted','failed','skipped','voided')),
+            qbo_post_error TEXT,
+            qbo_request_json TEXT,
+            qbo_response_json TEXT,
+            created_by_user_id TEXT,
+            created_by_name TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            posted_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_sde_shareholder_date
+            ON shareholder_dividend_events(shareholder_id, event_date DESC);
+        CREATE INDEX IF NOT EXISTS idx_sde_org_company
+            ON shareholder_dividend_events(org_id, company_id);
     """)
 
     # Safe column additions
@@ -3614,6 +3670,954 @@ async def get_journal_entry(
 
 
 # =====================================================================
+#  SHAREHOLDER DIVIDENDS
+# =====================================================================
+#
+# Tracks distributions to shareholders across all QBO companies the org
+# has connected. Each "A/C Drawing - [Person]" or "Dividend Payable -
+# [Person]" QBO account is linked to a first-class shareholder record
+# so amounts roll up across company files. Every recorded payment can
+# optionally post a balanced JE to the source company's QBO book using
+# the existing _build_je_payload / _post_je_to_qbo helpers.
+#
+# The reconciliation endpoint ties Net Income (P&L), Dividends Paid
+# (this table), and Cash Flow (cash flow report) together per company.
+
+class ShareholderIn(BaseModel):
+    display_name: str
+    short_name: Optional[str] = None
+    active: Optional[bool] = True
+    notes: Optional[str] = None
+
+
+class AccountLinkIn(BaseModel):
+    company_id: str
+    qbo_account_id: str
+    qbo_account_name: str
+    account_kind: str = "drawing"  # 'drawing' | 'dividend_payable'
+    is_default_for_writes: Optional[bool] = True
+
+
+class DividendEventIn(BaseModel):
+    shareholder_id: str
+    company_id: str
+    event_date: str  # YYYY-MM-DD
+    amount: float
+    kind: Optional[str] = "payment"  # 'payment' | 'declaration' | 'adjustment'
+    drawing_account_name: Optional[str] = None  # auto-resolved from default link if omitted
+    cash_account_name: Optional[str] = None     # required if post_to_qbo=true
+    memo: Optional[str] = None
+    post_to_qbo: Optional[bool] = True
+
+
+class DividendImportRow(BaseModel):
+    event_date: str
+    shareholder_match: str   # display_name or short_name — resolved server-side
+    company_match: str       # company name or id — resolved server-side
+    amount: float
+    memo: Optional[str] = None
+
+
+class DividendImportRequest(BaseModel):
+    rows: list  # list of DividendImportRow-shaped dicts
+    commit: Optional[bool] = False
+
+
+class ReconcileQuery(BaseModel):
+    company_ids: Optional[list] = None  # omit for all connected companies
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    date_macro: Optional[str] = None
+
+
+def _row_to_shareholder(row) -> dict:
+    return {
+        "id": row["id"],
+        "display_name": row["display_name"],
+        "short_name": row["short_name"],
+        "active": bool(row["active"]),
+        "notes": row["notes"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _row_to_account_link(row) -> dict:
+    return {
+        "id": row["id"],
+        "shareholder_id": row["shareholder_id"],
+        "company_id": row["company_id"],
+        "qbo_account_id": row["qbo_account_id"],
+        "qbo_account_name": row["qbo_account_name"],
+        "account_kind": row["account_kind"],
+        "is_default_for_writes": bool(row["is_default_for_writes"]),
+        "created_at": row["created_at"],
+    }
+
+
+def _row_to_dividend_event(row) -> dict:
+    return {
+        "id": row["id"],
+        "shareholder_id": row["shareholder_id"],
+        "company_id": row["company_id"],
+        "event_date": row["event_date"],
+        "amount": row["amount"],
+        "kind": row["kind"],
+        "drawing_account_name": row["drawing_account_name"],
+        "cash_account_name": row["cash_account_name"],
+        "memo": row["memo"],
+        "source": row["source"],
+        "qbo_je_id": row["qbo_je_id"],
+        "qbo_post_status": row["qbo_post_status"],
+        "qbo_post_error": row["qbo_post_error"],
+        "created_by_name": row["created_by_name"],
+        "created_at": row["created_at"],
+        "posted_at": row["posted_at"],
+    }
+
+
+def _resolve_default_drawing_account(db, shareholder_id: str, company_id: str):
+    """Pick the default drawing account for (shareholder, company).
+
+    Returns (qbo_account_id, qbo_account_name) or (None, None).
+    """
+    row = db.execute(
+        """SELECT qbo_account_id, qbo_account_name FROM shareholder_account_links
+           WHERE shareholder_id = ? AND company_id = ? AND account_kind = 'drawing'
+                 AND is_default_for_writes = 1
+           ORDER BY created_at ASC LIMIT 1""",
+        (shareholder_id, company_id),
+    ).fetchone()
+    if row:
+        return row["qbo_account_id"], row["qbo_account_name"]
+    # Fall back to any linked drawing account
+    row = db.execute(
+        """SELECT qbo_account_id, qbo_account_name FROM shareholder_account_links
+           WHERE shareholder_id = ? AND company_id = ? AND account_kind = 'drawing'
+           ORDER BY created_at ASC LIMIT 1""",
+        (shareholder_id, company_id),
+    ).fetchone()
+    if row:
+        return row["qbo_account_id"], row["qbo_account_name"]
+    return None, None
+
+
+@app.get("/api/shareholders")
+async def list_shareholders(
+    include_inactive: bool = False,
+    authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    if include_inactive:
+        rows = db.execute(
+            "SELECT * FROM shareholders WHERE org_id = ? ORDER BY display_name",
+            (org_id,),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM shareholders WHERE org_id = ? AND active = 1 ORDER BY display_name",
+            (org_id,),
+        ).fetchall()
+    # Pre-count links so the UI can show "3 accounts linked" badges.
+    links_by_sh = {}
+    all_links = db.execute(
+        "SELECT shareholder_id, COUNT(*) AS n FROM shareholder_account_links WHERE org_id = ? GROUP BY shareholder_id",
+        (org_id,),
+    ).fetchall()
+    for r in all_links:
+        links_by_sh[r["shareholder_id"]] = r["n"]
+    db.close()
+    out = []
+    for r in rows:
+        s = _row_to_shareholder(r)
+        s["linked_account_count"] = links_by_sh.get(s["id"], 0)
+        out.append(s)
+    return out
+
+
+@app.post("/api/shareholders")
+async def create_shareholder(req: ShareholderIn, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    if not req.display_name or not req.display_name.strip():
+        raise HTTPException(status_code=400, detail="display_name is required")
+    sid = str(uuid.uuid4())
+    db = get_db()
+    try:
+        db.execute(
+            """INSERT INTO shareholders (id, org_id, display_name, short_name, active, notes)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (sid, org_id, req.display_name.strip(),
+             (req.short_name or "").strip() or None,
+             1 if (req.active if req.active is not None else True) else 0,
+             req.notes),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.close()
+        raise HTTPException(status_code=409, detail="A shareholder with that display name already exists.")
+    row = db.execute("SELECT * FROM shareholders WHERE id = ?", (sid,)).fetchone()
+    db.close()
+    return _row_to_shareholder(row)
+
+
+@app.put("/api/shareholders/{shareholder_id}")
+async def update_shareholder(
+    shareholder_id: str, req: ShareholderIn, authorization: str = Header(None)
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    row = db.execute(
+        "SELECT id FROM shareholders WHERE id = ? AND org_id = ?",
+        (shareholder_id, org_id),
+    ).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(status_code=404, detail="Shareholder not found")
+    db.execute(
+        """UPDATE shareholders
+           SET display_name = ?, short_name = ?, active = ?, notes = ?,
+               updated_at = datetime('now')
+           WHERE id = ? AND org_id = ?""",
+        (req.display_name.strip(),
+         (req.short_name or "").strip() or None,
+         1 if (req.active if req.active is not None else True) else 0,
+         req.notes, shareholder_id, org_id),
+    )
+    db.commit()
+    out = db.execute("SELECT * FROM shareholders WHERE id = ?", (shareholder_id,)).fetchone()
+    db.close()
+    return _row_to_shareholder(out)
+
+
+@app.delete("/api/shareholders/{shareholder_id}")
+async def deactivate_shareholder(shareholder_id: str, authorization: str = Header(None)):
+    """Soft-delete. Keeps historical event attribution intact."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    row = db.execute(
+        "SELECT id FROM shareholders WHERE id = ? AND org_id = ?",
+        (shareholder_id, org_id),
+    ).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(status_code=404, detail="Shareholder not found")
+    db.execute(
+        "UPDATE shareholders SET active = 0, updated_at = datetime('now') WHERE id = ?",
+        (shareholder_id,),
+    )
+    db.commit()
+    db.close()
+    return {"id": shareholder_id, "active": False}
+
+
+@app.get("/api/shareholders/{shareholder_id}/account-links")
+async def list_account_links(shareholder_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    rows = db.execute(
+        """SELECT sal.*, c.name AS company_name
+           FROM shareholder_account_links sal
+           LEFT JOIN companies c ON c.id = sal.company_id
+           WHERE sal.shareholder_id = ? AND sal.org_id = ?
+           ORDER BY c.name, sal.qbo_account_name""",
+        (shareholder_id, org_id),
+    ).fetchall()
+    db.close()
+    out = []
+    for r in rows:
+        link = _row_to_account_link(r)
+        link["company_name"] = r["company_name"]
+        out.append(link)
+    return out
+
+
+@app.post("/api/shareholders/{shareholder_id}/account-links")
+async def create_account_link(
+    shareholder_id: str, req: AccountLinkIn, authorization: str = Header(None)
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    if req.account_kind not in ("drawing", "dividend_payable"):
+        raise HTTPException(status_code=400, detail="account_kind must be 'drawing' or 'dividend_payable'")
+    db = get_db()
+    sh = db.execute(
+        "SELECT id FROM shareholders WHERE id = ? AND org_id = ?",
+        (shareholder_id, org_id),
+    ).fetchone()
+    if not sh:
+        db.close()
+        raise HTTPException(status_code=404, detail="Shareholder not found")
+    co = db.execute(
+        "SELECT id FROM companies WHERE id = ? AND org_id = ?",
+        (req.company_id, org_id),
+    ).fetchone()
+    if not co:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found in this org")
+    lid = str(uuid.uuid4())
+    try:
+        db.execute(
+            """INSERT INTO shareholder_account_links
+               (id, org_id, shareholder_id, company_id, qbo_account_id,
+                qbo_account_name, account_kind, is_default_for_writes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (lid, org_id, shareholder_id, req.company_id, req.qbo_account_id,
+             req.qbo_account_name, req.account_kind,
+             1 if req.is_default_for_writes else 0),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.close()
+        raise HTTPException(
+            status_code=409,
+            detail="This QBO account is already linked (possibly to another shareholder).",
+        )
+    row = db.execute(
+        "SELECT * FROM shareholder_account_links WHERE id = ?", (lid,)
+    ).fetchone()
+    db.close()
+    return _row_to_account_link(row)
+
+
+@app.delete("/api/shareholders/{shareholder_id}/account-links/{link_id}")
+async def delete_account_link(
+    shareholder_id: str, link_id: str, authorization: str = Header(None)
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    row = db.execute(
+        "SELECT id FROM shareholder_account_links WHERE id = ? AND shareholder_id = ? AND org_id = ?",
+        (link_id, shareholder_id, org_id),
+    ).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(status_code=404, detail="Link not found")
+    db.execute("DELETE FROM shareholder_account_links WHERE id = ?", (link_id,))
+    db.commit()
+    db.close()
+    return {"id": link_id, "deleted": True}
+
+
+@app.get("/api/shareholders/{shareholder_id}/balances")
+async def get_shareholder_balances(shareholder_id: str, authorization: str = Header(None)):
+    """Sum current_balance across every linked QBO account, grouped by company.
+
+    Reads from the cached company_accounts table — run
+    `POST /api/companies/{id}/sync` to refresh upstream data.
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    sh = db.execute(
+        "SELECT * FROM shareholders WHERE id = ? AND org_id = ?",
+        (shareholder_id, org_id),
+    ).fetchone()
+    if not sh:
+        db.close()
+        raise HTTPException(status_code=404, detail="Shareholder not found")
+    rows = db.execute(
+        """SELECT sal.company_id, sal.qbo_account_id, sal.qbo_account_name, sal.account_kind,
+                  c.name AS company_name,
+                  ca.current_balance AS balance
+           FROM shareholder_account_links sal
+           LEFT JOIN companies c ON c.id = sal.company_id
+           LEFT JOIN company_accounts ca
+             ON ca.company_id = sal.company_id
+            AND ca.qbo_account_id = sal.qbo_account_id
+           WHERE sal.shareholder_id = ? AND sal.org_id = ?""",
+        (shareholder_id, org_id),
+    ).fetchall()
+    by_company = {}
+    total = 0.0
+    for r in rows:
+        cid = r["company_id"]
+        bal = float(r["balance"] or 0)
+        if cid not in by_company:
+            by_company[cid] = {
+                "company_id": cid,
+                "company_name": r["company_name"],
+                "total_balance": 0.0,
+                "accounts": [],
+            }
+        by_company[cid]["total_balance"] += bal
+        by_company[cid]["accounts"].append({
+            "qbo_account_id": r["qbo_account_id"],
+            "qbo_account_name": r["qbo_account_name"],
+            "account_kind": r["account_kind"],
+            "current_balance": bal,
+        })
+        total += bal
+    db.close()
+    return {
+        "shareholder_id": shareholder_id,
+        "shareholder_name": sh["display_name"],
+        "total_balance": round(total, 2),
+        "companies": list(by_company.values()),
+    }
+
+
+@app.get("/api/dividend-events")
+async def list_dividend_events(
+    shareholder_id: Optional[str] = None,
+    company_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    status: Optional[str] = None,
+    authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    clauses = ["e.org_id = ?"]
+    params = [org_id]
+    if shareholder_id:
+        clauses.append("e.shareholder_id = ?"); params.append(shareholder_id)
+    if company_id:
+        clauses.append("e.company_id = ?"); params.append(company_id)
+    if start_date:
+        clauses.append("e.event_date >= ?"); params.append(start_date)
+    if end_date:
+        clauses.append("e.event_date <= ?"); params.append(end_date)
+    if status:
+        clauses.append("e.qbo_post_status = ?"); params.append(status)
+    sql = (
+        "SELECT e.*, s.display_name AS shareholder_name, c.name AS company_name "
+        "FROM shareholder_dividend_events e "
+        "LEFT JOIN shareholders s ON s.id = e.shareholder_id "
+        "LEFT JOIN companies c ON c.id = e.company_id "
+        "WHERE " + " AND ".join(clauses) + " ORDER BY e.event_date DESC, e.created_at DESC"
+    )
+    db = get_db()
+    rows = db.execute(sql, tuple(params)).fetchall()
+    db.close()
+    out = []
+    for r in rows:
+        evt = _row_to_dividend_event(r)
+        evt["shareholder_name"] = r["shareholder_name"]
+        evt["company_name"] = r["company_name"]
+        out.append(evt)
+    return out
+
+
+@app.post("/api/dividend-events")
+async def create_dividend_event(req: DividendEventIn, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be > 0")
+    db = get_db()
+    sh = db.execute(
+        "SELECT * FROM shareholders WHERE id = ? AND org_id = ? AND active = 1",
+        (req.shareholder_id, org_id),
+    ).fetchone()
+    if not sh:
+        db.close()
+        raise HTTPException(status_code=404, detail="Shareholder not found or inactive")
+    co = db.execute(
+        "SELECT id, name FROM companies WHERE id = ? AND org_id = ?",
+        (req.company_id, org_id),
+    ).fetchone()
+    if not co:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    drawing_name = req.drawing_account_name
+    if not drawing_name:
+        _aid, drawing_name = _resolve_default_drawing_account(db, req.shareholder_id, req.company_id)
+    if req.post_to_qbo and not drawing_name:
+        db.close()
+        raise HTTPException(
+            status_code=400,
+            detail="No drawing account is linked for this shareholder at this company. "
+                   "Add an account link or pass drawing_account_name explicitly.",
+        )
+    if req.post_to_qbo and not req.cash_account_name:
+        db.close()
+        raise HTTPException(status_code=400, detail="cash_account_name is required when post_to_qbo=true")
+
+    eid = str(uuid.uuid4())
+    db.execute(
+        """INSERT INTO shareholder_dividend_events
+           (id, org_id, shareholder_id, company_id, event_date, amount, kind,
+            drawing_account_name, cash_account_name, memo, source,
+            qbo_post_status, created_by_user_id, created_by_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?, ?)""",
+        (eid, org_id, req.shareholder_id, req.company_id, req.event_date,
+         float(req.amount), req.kind or "payment",
+         drawing_name, req.cash_account_name, req.memo,
+         "pending" if req.post_to_qbo else "skipped",
+         user["id"], user.get("name") or user.get("email")),
+    )
+    db.commit()
+
+    posted = False
+    if req.post_to_qbo:
+        je_req = JournalEntryRequest(
+            date=req.event_date,
+            private_note=(req.memo or f"Dividend to {sh['display_name']}"),
+            lines=[
+                JournalEntryLine(posting_type="Debit",  account_name=drawing_name,          amount=float(req.amount)),
+                JournalEntryLine(posting_type="Credit", account_name=req.cash_account_name, amount=float(req.amount)),
+            ],
+        )
+        try:
+            payload, total_debits, line_count = _build_je_payload(db, req.company_id, co["name"], je_req)
+            je = await _post_je_to_qbo(db, req.company_id, payload)
+            db.execute(
+                """UPDATE shareholder_dividend_events
+                   SET qbo_je_id = ?, qbo_post_status = 'posted', posted_at = datetime('now'),
+                       qbo_response_json = ?, updated_at = datetime('now')
+                   WHERE id = ?""",
+                (je.get("Id"), json.dumps(je)[:20000], eid),
+            )
+            db.commit()
+            posted = True
+        except HTTPException as he:
+            db.execute(
+                """UPDATE shareholder_dividend_events
+                   SET qbo_post_status = 'failed', qbo_post_error = ?, updated_at = datetime('now')
+                   WHERE id = ?""",
+                (str(he.detail)[:2000], eid),
+            )
+            db.commit()
+            db.close()
+            raise HTTPException(status_code=502, detail=f"QBO error: {he.detail}")
+        except Exception as e:
+            db.execute(
+                """UPDATE shareholder_dividend_events
+                   SET qbo_post_status = 'failed', qbo_post_error = ?, updated_at = datetime('now')
+                   WHERE id = ?""",
+                (str(e)[:2000], eid),
+            )
+            db.commit()
+            db.close()
+            raise HTTPException(status_code=500, detail=f"Failed to post JE: {e}")
+
+    row = db.execute(
+        "SELECT * FROM shareholder_dividend_events WHERE id = ?", (eid,)
+    ).fetchone()
+    db.close()
+    evt = _row_to_dividend_event(row)
+    evt["posted"] = posted
+    return evt
+
+
+@app.post("/api/dividend-events/{event_id}/void")
+async def void_dividend_event(event_id: str, authorization: str = Header(None)):
+    """Reverse a posted (or imported) dividend event.
+
+    For `posted` events this creates a reversing JE in QBO (debit Cash /
+    credit Drawing). For `skipped` / `failed` / `pending` events it
+    simply flips status to `voided` without a QBO call.
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    row = db.execute(
+        """SELECT e.*, c.name AS company_name
+           FROM shareholder_dividend_events e
+           LEFT JOIN companies c ON c.id = e.company_id
+           WHERE e.id = ? AND e.org_id = ?""",
+        (event_id, org_id),
+    ).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(status_code=404, detail="Event not found")
+    if row["qbo_post_status"] == "voided":
+        db.close()
+        raise HTTPException(status_code=409, detail="Event is already voided")
+
+    if row["qbo_post_status"] == "posted":
+        if not row["drawing_account_name"] or not row["cash_account_name"]:
+            db.close()
+            raise HTTPException(
+                status_code=400,
+                detail="Event missing account names; cannot auto-reverse.",
+            )
+        je_req = JournalEntryRequest(
+            date=datetime.now().strftime("%Y-%m-%d"),
+            private_note=f"Reverse dividend {event_id} (original JE {row['qbo_je_id']})",
+            lines=[
+                JournalEntryLine(posting_type="Debit",  account_name=row["cash_account_name"],    amount=float(row["amount"])),
+                JournalEntryLine(posting_type="Credit", account_name=row["drawing_account_name"], amount=float(row["amount"])),
+            ],
+        )
+        try:
+            payload, _td, _lc = _build_je_payload(db, row["company_id"], row["company_name"] or "", je_req)
+            je = await _post_je_to_qbo(db, row["company_id"], payload)
+        except HTTPException as he:
+            db.close()
+            raise HTTPException(status_code=502, detail=f"QBO error: {he.detail}")
+        db.execute(
+            """UPDATE shareholder_dividend_events
+               SET qbo_post_status = 'voided', qbo_post_error = NULL,
+                   qbo_response_json = ?, updated_at = datetime('now')
+               WHERE id = ?""",
+            (json.dumps({"reversed_by": je.get("Id")})[:20000], event_id),
+        )
+    else:
+        db.execute(
+            """UPDATE shareholder_dividend_events
+               SET qbo_post_status = 'voided', updated_at = datetime('now')
+               WHERE id = ?""",
+            (event_id,),
+        )
+    db.commit()
+    out = db.execute("SELECT * FROM shareholder_dividend_events WHERE id = ?", (event_id,)).fetchone()
+    db.close()
+    return _row_to_dividend_event(out)
+
+
+@app.post("/api/dividend-events/import")
+async def import_dividend_events(req: DividendImportRequest, authorization: str = Header(None)):
+    """Dry-run (default) or commit a bulk import of historical dividend rows.
+
+    Rows are matched by shareholder display_name / short_name and by
+    company name / id. Imported rows are flagged `source='import'`,
+    `qbo_post_status='skipped'` (they're already in QBO — this only
+    seeds this app's event log for reconciliation).
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    shareholders = db.execute(
+        "SELECT id, display_name, short_name FROM shareholders WHERE org_id = ?",
+        (org_id,),
+    ).fetchall()
+    companies = db.execute(
+        "SELECT id, name FROM companies WHERE org_id = ?",
+        (org_id,),
+    ).fetchall()
+
+    def _match_shareholder(val: str):
+        v = (val or "").strip().lower()
+        if not v:
+            return None
+        for s in shareholders:
+            if (s["display_name"] or "").lower().strip() == v:
+                return s
+        for s in shareholders:
+            if (s["short_name"] or "").lower().strip() == v:
+                return s
+        return None
+
+    def _match_company(val: str):
+        v = (val or "").strip().lower()
+        if not v:
+            return None
+        for c in companies:
+            if c["id"].lower() == v or (c["name"] or "").lower().strip() == v:
+                return c
+        return None
+
+    preview = []
+    for i, raw in enumerate(req.rows or []):
+        row = raw if isinstance(raw, dict) else raw.dict()
+        sh = _match_shareholder(row.get("shareholder_match", ""))
+        co = _match_company(row.get("company_match", ""))
+        try:
+            amt = float(row.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+        errors = []
+        if not sh: errors.append("unknown shareholder")
+        if not co: errors.append("unknown company")
+        if amt <= 0: errors.append("amount must be > 0")
+        if not row.get("event_date"): errors.append("event_date required")
+        preview.append({
+            "index": i,
+            "event_date": row.get("event_date"),
+            "shareholder_id": sh["id"] if sh else None,
+            "shareholder_name": sh["display_name"] if sh else None,
+            "company_id": co["id"] if co else None,
+            "company_name": co["name"] if co else None,
+            "amount": amt,
+            "memo": row.get("memo") or None,
+            "errors": errors,
+        })
+
+    writable = [p for p in preview if not p["errors"]]
+    if not req.commit:
+        db.close()
+        return {"dry_run": True, "preview": preview, "writable_count": len(writable)}
+
+    # Commit path
+    written = 0
+    for p in writable:
+        db.execute(
+            """INSERT INTO shareholder_dividend_events
+               (id, org_id, shareholder_id, company_id, event_date, amount, kind,
+                drawing_account_name, cash_account_name, memo, source,
+                qbo_post_status, created_by_user_id, created_by_name)
+               VALUES (?, ?, ?, ?, ?, ?, 'payment', NULL, NULL, ?, 'import',
+                       'skipped', ?, ?)""",
+            (str(uuid.uuid4()), org_id, p["shareholder_id"], p["company_id"],
+             p["event_date"], float(p["amount"]), p["memo"],
+             user["id"], user.get("name") or user.get("email")),
+        )
+        written += 1
+    db.commit()
+    db.close()
+    return {"dry_run": False, "preview": preview, "written": written}
+
+
+@app.get("/api/dividend-events/reconcile")
+async def reconcile_dividend_events(
+    company_id: str,
+    start_date: str,
+    end_date: str,
+    authorization: str = Header(None),
+):
+    """Reconcile local events against QBO transaction history for each
+    drawing account linked to any shareholder in this company. Joins on
+    QBO journal-entry id; returns three buckets: matched, qbo_only,
+    app_only.
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    links = db.execute(
+        """SELECT DISTINCT qbo_account_name, shareholder_id
+           FROM shareholder_account_links
+           WHERE company_id = ? AND org_id = ? AND account_kind = 'drawing'""",
+        (company_id, org_id),
+    ).fetchall()
+    events = db.execute(
+        """SELECT * FROM shareholder_dividend_events
+           WHERE company_id = ? AND org_id = ?
+             AND event_date BETWEEN ? AND ?
+             AND qbo_post_status IN ('posted','skipped','voided')""",
+        (company_id, org_id, start_date, end_date),
+    ).fetchall()
+    db.close()
+    by_je = {e["qbo_je_id"]: e for e in events if e["qbo_je_id"]}
+
+    # Pull QBO transactions per unique account name (best-effort — don't
+    # let a single failure kill the whole reconcile).
+    matched = []
+    qbo_only = []
+    seen_je_ids = set()
+    for link in links:
+        try:
+            params = TransactionDetailParams(
+                account_name=link["qbo_account_name"],
+                start_date=start_date,
+                end_date=end_date,
+                company_id=company_id,
+            )
+            resp = await get_transaction_detail(params, authorization)
+        except Exception:
+            continue
+        txns = (resp or {}).get("transactions") or (resp or {}).get("current", {}).get("transactions") or []
+        for t in txns:
+            je_id = t.get("txn_id") or t.get("id") or t.get("TxnId")
+            if not je_id:
+                continue
+            if je_id in seen_je_ids:
+                continue
+            seen_je_ids.add(je_id)
+            local = by_je.get(str(je_id))
+            if local:
+                matched.append({"qbo_je_id": je_id, "qbo_txn": t, "event": _row_to_dividend_event(local)})
+            else:
+                qbo_only.append({"qbo_je_id": je_id, "qbo_txn": t, "account_name": link["qbo_account_name"]})
+
+    app_only = []
+    for e in events:
+        if not e["qbo_je_id"] or e["qbo_je_id"] not in seen_je_ids:
+            if e["source"] != "import":
+                # imports are by definition app-only unless they have a JE id
+                app_only.append(_row_to_dividend_event(e))
+            elif e["qbo_je_id"]:
+                app_only.append(_row_to_dividend_event(e))
+
+    return {
+        "company_id": company_id,
+        "start_date": start_date,
+        "end_date": end_date,
+        "matched": matched,
+        "qbo_only": qbo_only,
+        "app_only": app_only,
+    }
+
+
+@app.post("/api/reconciliation/profit-dividend-cash")
+async def profit_dividend_cash(req: ReconcileQuery, authorization: str = Header(None)):
+    """Per-company: Net Income (P&L) ↔ Dividends Issued (this app) ↔ Cash Flow.
+
+    Returns one row per company plus a total row, with derived fields
+    `distributable_remainder` (= NI − dividends) and
+    `financing_variance` (= financing_cash − (−dividends), i.e. the
+    portion of financing activity that isn't dividend outflow).
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+
+    db = get_db()
+    co_rows = db.execute(
+        "SELECT id, name FROM companies WHERE org_id = ? AND status IN ('connected','synced')",
+        (org_id,),
+    ).fetchall()
+    if req.company_ids:
+        wanted = set(req.company_ids)
+        co_rows = [c for c in co_rows if c["id"] in wanted]
+
+    # Cash on hand snapshot for the reconcile response
+    _recon_cash_by_co = _cash_on_hand_by_company(db, [c["id"] for c in co_rows])
+
+    # Pull dividend totals once for the period
+    evt_clause = [
+        "org_id = ?", "kind = 'payment'",
+        "qbo_post_status IN ('posted','skipped')",
+    ]
+    evt_params = [org_id]
+    if req.start_date:
+        evt_clause.append("event_date >= ?"); evt_params.append(req.start_date)
+    if req.end_date:
+        evt_clause.append("event_date <= ?"); evt_params.append(req.end_date)
+    if req.company_ids:
+        placeholders = ",".join("?" for _ in req.company_ids)
+        evt_clause.append(f"company_id IN ({placeholders})"); evt_params.extend(req.company_ids)
+    div_rows = db.execute(
+        "SELECT company_id, SUM(amount) AS total FROM shareholder_dividend_events "
+        "WHERE " + " AND ".join(evt_clause) + " GROUP BY company_id",
+        tuple(evt_params),
+    ).fetchall()
+    dividends_by_company = {r["company_id"]: float(r["total"] or 0) for r in div_rows}
+    db.close()
+
+    out_rows = []
+    totals = {
+        "net_income": 0.0, "dividends_paid": 0.0,
+        "operating_cash": 0.0, "investing_cash": 0.0,
+        "financing_cash": 0.0, "net_cash_change": 0.0,
+    }
+    for co in co_rows:
+        try:
+            pl_params = ReportParams(
+                company_id=co["id"],
+                start_date=req.start_date, end_date=req.end_date,
+                date_macro=req.date_macro,
+            )
+            cf_params = ReportParams(
+                company_id=co["id"],
+                start_date=req.start_date, end_date=req.end_date,
+                date_macro=req.date_macro,
+            )
+            pl = await get_profit_loss(pl_params, authorization)
+            cf = await get_cash_flow(cf_params, authorization)
+        except HTTPException:
+            continue
+        except Exception:
+            continue
+
+        def _extract_net_income(report):
+            if not report: return 0.0
+            cur = report.get("current") or report
+            totals_obj = cur.get("totals") if isinstance(cur, dict) else None
+            if isinstance(totals_obj, dict):
+                for k in ("net_income", "NetIncome", "net_operating_income", "net_income_loss"):
+                    if k in totals_obj:
+                        try: return float(totals_obj[k])
+                        except Exception: pass
+            if isinstance(cur, dict) and "net_income" in cur:
+                try: return float(cur["net_income"])
+                except Exception: pass
+            return 0.0
+
+        def _extract_cash_block(report, key):
+            if not report: return 0.0
+            cur = report.get("current") or report
+            totals_obj = cur.get("totals") if isinstance(cur, dict) else None
+            if isinstance(totals_obj, dict) and key in totals_obj:
+                try: return float(totals_obj[key])
+                except Exception: pass
+            if isinstance(cur, dict) and key in cur:
+                try: return float(cur[key])
+                except Exception: pass
+            return 0.0
+
+        ni = _extract_net_income(pl)
+        op = _extract_cash_block(cf, "operating_activities")
+        iv = _extract_cash_block(cf, "investing_activities")
+        fn = _extract_cash_block(cf, "financing_activities")
+        nc = _extract_cash_block(cf, "net_cash_change") or (op + iv + fn)
+        div = dividends_by_company.get(co["id"], 0.0)
+
+        notes = []
+        if div > ni:       notes.append("dividends_exceed_net_income")
+        if div > op:       notes.append("dividends_exceed_operating_cash")
+        financing_variance = fn - (-div)
+        if abs(financing_variance) > 1:
+            notes.append("financing_variance_nonzero")
+
+        out_rows.append({
+            "company_id": co["id"], "company_name": co["name"],
+            "cash_on_hand": round(_recon_cash_by_co.get(co["id"], 0.0), 2),
+            "net_income": round(ni, 2), "dividends_paid": round(div, 2),
+            "payout_ratio": round(div / ni, 4) if ni > 0 else None,
+            "distributable_remainder": round(ni - div, 2),
+            "operating_cash": round(op, 2), "investing_cash": round(iv, 2),
+            "financing_cash": round(fn, 2), "net_cash_change": round(nc, 2),
+            "expected_financing_out": round(-div, 2),
+            "financing_variance": round(financing_variance, 2),
+            "variance_notes": notes,
+        })
+        totals["net_income"]       += ni
+        totals["dividends_paid"]   += div
+        totals["operating_cash"]   += op
+        totals["investing_cash"]   += iv
+        totals["financing_cash"]   += fn
+        totals["net_cash_change"]  += nc
+
+    return {
+        "start_date": req.start_date, "end_date": req.end_date,
+        "date_macro": req.date_macro,
+        "rows": out_rows,
+        "totals": {
+            **{k: round(v, 2) for k, v in totals.items()},
+            "distributable_remainder": round(totals["net_income"] - totals["dividends_paid"], 2),
+            "expected_financing_out": round(-totals["dividends_paid"], 2),
+            "financing_variance": round(totals["financing_cash"] - (-totals["dividends_paid"]), 2),
+        },
+    }
+
+
+# =====================================================================
 #  IC TEMPLATES
 # =====================================================================
 
@@ -3890,6 +4894,421 @@ async def revenue_trend(
         })
 
     return {"months": results}
+
+
+# =====================================================================
+#  DIVIDEND ANALYTICS DASHBOARD
+# =====================================================================
+#
+# One endpoint bundles everything the dashboard needs: KPIs, flags,
+# per-company breakdown, per-shareholder concentration, sourcing
+# matrix, and a 12-month trend. Reuses P&L + Cash Flow handlers for
+# per-company numbers, `shareholder_dividend_events` for distribution
+# totals, and the cached `company_accounts` table for point-in-time
+# cash on hand (no extra QBO calls).
+
+class DividendDashboardQuery(BaseModel):
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    date_macro: Optional[str] = None
+    company_ids: Optional[list] = None
+    trend_months: Optional[int] = 12
+    compare_prior_period: Optional[bool] = True
+
+
+def _resolve_period(start_date: Optional[str], end_date: Optional[str], macro: Optional[str]):
+    """Return (start_date, end_date, label) tuple. If both explicit dates
+    are provided they win; otherwise `macro` is interpreted as one of the
+    common QBO-style values. Defaults to YTD."""
+    if start_date and end_date:
+        return start_date, end_date, f"{start_date} to {end_date}"
+    now = datetime.now()
+    m = (macro or "this-year-to-date").lower()
+    if m in ("this-year-to-date", "ytd"):
+        return f"{now.year}-01-01", now.strftime("%Y-%m-%d"), f"YTD {now.year}"
+    if m in ("this-quarter", "qtd"):
+        q_start_month = ((now.month - 1) // 3) * 3 + 1
+        return f"{now.year}-{q_start_month:02d}-01", now.strftime("%Y-%m-%d"), f"Q{(q_start_month-1)//3+1} {now.year}"
+    if m in ("this-month", "mtd"):
+        return f"{now.year}-{now.month:02d}-01", now.strftime("%Y-%m-%d"), f"{calendar.month_name[now.month]} {now.year}"
+    if m == "last-year":
+        y = now.year - 1
+        return f"{y}-01-01", f"{y}-12-31", f"FY {y}"
+    if m == "last-month":
+        y = now.year if now.month > 1 else now.year - 1
+        mo = now.month - 1 or 12
+        last = calendar.monthrange(y, mo)[1]
+        return f"{y}-{mo:02d}-01", f"{y}-{mo:02d}-{last:02d}", f"{calendar.month_name[mo]} {y}"
+    # Fallback YTD
+    return f"{now.year}-01-01", now.strftime("%Y-%m-%d"), f"YTD {now.year}"
+
+
+def _prior_period(start_date: str, end_date: str):
+    """Shift (start, end) back by the same span so KPIs can show deltas."""
+    try:
+        s = datetime.strptime(start_date, "%Y-%m-%d")
+        e = datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError:
+        return start_date, end_date, f"{start_date} to {end_date}"
+    span_days = (e - s).days + 1
+    prior_end = s - timedelta(days=1)
+    prior_start = prior_end - timedelta(days=span_days - 1)
+    ss = prior_start.strftime("%Y-%m-%d")
+    ee = prior_end.strftime("%Y-%m-%d")
+    return ss, ee, f"{ss} to {ee}"
+
+
+def _cash_on_hand_by_company(db, company_ids: list):
+    """Sum of Bank + cash-like Other-Current-Asset balances from the
+    cached company_accounts table, per company. company_accounts has
+    no org_id column; callers must pre-filter company_ids by org."""
+    if not company_ids:
+        return {}
+    placeholders = ",".join("?" for _ in company_ids)
+    rows = db.execute(
+        f"""SELECT company_id, SUM(current_balance) AS cash
+            FROM company_accounts
+            WHERE active = 1
+              AND company_id IN ({placeholders})
+              AND ( account_type = 'Bank'
+                    OR ( account_type = 'Other Current Asset'
+                         AND ( account_sub_type LIKE '%Cash%'
+                               OR account_sub_type = 'UndepositedFunds' ) ) )
+            GROUP BY company_id""",
+        tuple(company_ids),
+    ).fetchall()
+    return {r["company_id"]: float(r["cash"] or 0) for r in rows}
+
+
+def _extract_pl_net_income(report: dict) -> float:
+    if not report: return 0.0
+    cur = report.get("current") or report
+    totals_obj = cur.get("totals") if isinstance(cur, dict) else None
+    if isinstance(totals_obj, dict):
+        for k in ("net_income", "NetIncome", "net_operating_income", "net_income_loss"):
+            if k in totals_obj:
+                try: return float(totals_obj[k])
+                except Exception: pass
+    if isinstance(cur, dict) and "net_income" in cur:
+        try: return float(cur["net_income"])
+        except Exception: pass
+    return 0.0
+
+
+def _extract_cf_block(report: dict, key: str) -> float:
+    if not report: return 0.0
+    cur = report.get("current") or report
+    totals_obj = cur.get("totals") if isinstance(cur, dict) else None
+    if isinstance(totals_obj, dict) and key in totals_obj:
+        try: return float(totals_obj[key])
+        except Exception: pass
+    if isinstance(cur, dict) and key in cur:
+        try: return float(cur[key])
+        except Exception: pass
+    return 0.0
+
+
+@app.post("/api/dashboard/dividends")
+async def dividend_dashboard(req: DividendDashboardQuery, authorization: str = Header(None)):
+    """One-shot dashboard payload: KPIs, flags, per-company, per-
+    shareholder, monthly trend. Safe to call with no connected
+    companies — returns empty arrays rather than 500."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+
+    period_start, period_end, period_label = _resolve_period(
+        req.start_date, req.end_date, req.date_macro
+    )
+
+    db = get_db()
+    co_rows = db.execute(
+        "SELECT id, name FROM companies WHERE org_id = ? AND status IN ('connected','synced')",
+        (org_id,),
+    ).fetchall()
+    if req.company_ids:
+        wanted = set(req.company_ids)
+        co_rows = [c for c in co_rows if c["id"] in wanted]
+    company_ids = [c["id"] for c in co_rows]
+
+    # Dividend totals per company for current period
+    def _div_totals(s: str, e: str) -> dict:
+        if not company_ids:
+            return {}
+        ph = ",".join("?" for _ in company_ids)
+        rows = db.execute(
+            f"""SELECT company_id, SUM(amount) AS total
+                FROM shareholder_dividend_events
+                WHERE org_id = ? AND kind = 'payment'
+                  AND qbo_post_status IN ('posted','skipped')
+                  AND event_date BETWEEN ? AND ?
+                  AND company_id IN ({ph})
+                GROUP BY company_id""",
+            (org_id, s, e, *company_ids),
+        ).fetchall()
+        return {r["company_id"]: float(r["total"] or 0) for r in rows}
+
+    current_div_by_co = _div_totals(period_start, period_end)
+    prior_start = prior_end = prior_label = None
+    prior_div_by_co = {}
+    if req.compare_prior_period:
+        prior_start, prior_end, prior_label = _prior_period(period_start, period_end)
+        prior_div_by_co = _div_totals(prior_start, prior_end)
+
+    # Per-shareholder aggregation for current period
+    sh_rows = db.execute(
+        f"""SELECT e.shareholder_id, s.display_name AS name, e.company_id, c.name AS company_name,
+                   SUM(e.amount) AS amount
+            FROM shareholder_dividend_events e
+            LEFT JOIN shareholders s ON s.id = e.shareholder_id
+            LEFT JOIN companies c    ON c.id = e.company_id
+            WHERE e.org_id = ? AND e.kind = 'payment'
+              AND e.qbo_post_status IN ('posted','skipped')
+              AND e.event_date BETWEEN ? AND ?
+              {('AND e.company_id IN (' + ','.join('?' for _ in company_ids) + ')') if company_ids else ''}
+            GROUP BY e.shareholder_id, e.company_id
+            ORDER BY s.display_name""",
+        (org_id, period_start, period_end, *(company_ids if company_ids else ())),
+    ).fetchall()
+
+    by_shareholder_map = {}
+    for r in sh_rows:
+        sid = r["shareholder_id"]
+        if sid not in by_shareholder_map:
+            by_shareholder_map[sid] = {
+                "shareholder_id": sid,
+                "shareholder_name": r["name"] or "(unknown)",
+                "total_paid": 0.0,
+                "share_of_total": 0.0,
+                "by_company": [],
+            }
+        amt = float(r["amount"] or 0)
+        by_shareholder_map[sid]["total_paid"] += amt
+        by_shareholder_map[sid]["by_company"].append({
+            "company_id": r["company_id"],
+            "company_name": r["company_name"],
+            "amount": round(amt, 2),
+        })
+
+    # Cash on hand (current snapshot from cached accounts)
+    cash_by_co = _cash_on_hand_by_company(db, company_ids)
+    db.close()
+
+    # Per-company: P&L + Cash Flow (live via existing handlers)
+    by_company = []
+    total_ni = 0.0
+    total_div = 0.0
+    total_operating = 0.0
+    total_investing = 0.0
+    total_financing = 0.0
+    flags: list = []
+    for co in co_rows:
+        try:
+            pl_params = ReportParams(
+                company_id=co["id"],
+                start_date=period_start, end_date=period_end,
+            )
+            cf_params = ReportParams(
+                company_id=co["id"],
+                start_date=period_start, end_date=period_end,
+            )
+            pl = await get_profit_loss(pl_params, authorization)
+            cf = await get_cash_flow(cf_params, authorization)
+        except HTTPException:
+            pl = cf = None
+        except Exception:
+            pl = cf = None
+
+        ni = _extract_pl_net_income(pl)
+        op = _extract_cf_block(cf, "operating_activities")
+        iv = _extract_cf_block(cf, "investing_activities")
+        fn = _extract_cf_block(cf, "financing_activities")
+        div = current_div_by_co.get(co["id"], 0.0)
+        cash = cash_by_co.get(co["id"], 0.0)
+        payout = (div / ni) if ni > 0 else None
+        distributable = ni - div
+        financing_variance = fn - (-div)
+
+        row_flags = []
+        if ni > 0 and div > ni:
+            row_flags.append("over_distribution")
+            flags.append({
+                "kind": "over_distribution", "scope": "company",
+                "id": co["id"], "label": co["name"],
+                "message": f"{co['name']}: dividends (${div:,.0f}) exceed net income (${ni:,.0f}).",
+            })
+        if div > op and op > 0:
+            row_flags.append("dividends_exceed_operating_cash")
+            flags.append({
+                "kind": "dividends_exceed_operating_cash", "scope": "company",
+                "id": co["id"], "label": co["name"],
+                "message": f"{co['name']}: dividends (${div:,.0f}) exceed operating cash (${op:,.0f}).",
+            })
+        # Thin cash cushion: cash < 3x monthly avg dividend for this company over the period
+        # Approximate monthly avg by assuming the period days map to months proportionally.
+        try:
+            period_days = (datetime.strptime(period_end, "%Y-%m-%d") - datetime.strptime(period_start, "%Y-%m-%d")).days + 1
+        except Exception:
+            period_days = 30
+        monthly_avg_div = (div / period_days * 30) if period_days else 0
+        if monthly_avg_div > 0 and cash < 3 * monthly_avg_div:
+            row_flags.append("thin_cash_cushion")
+            flags.append({
+                "kind": "thin_cash_cushion", "scope": "company",
+                "id": co["id"], "label": co["name"],
+                "message": f"{co['name']}: cash on hand (${cash:,.0f}) < 3 × monthly avg dividend (${monthly_avg_div:,.0f}).",
+            })
+        if abs(financing_variance) > 1:
+            row_flags.append("financing_variance")
+
+        by_company.append({
+            "company_id": co["id"], "company_name": co["name"],
+            "cash_on_hand": round(cash, 2),
+            "net_income": round(ni, 2),
+            "dividends_paid": round(div, 2),
+            "payout_ratio": None if payout is None else round(payout, 4),
+            "distributable_remainder": round(distributable, 2),
+            "operating_cash": round(op, 2),
+            "investing_cash": round(iv, 2),
+            "financing_cash": round(fn, 2),
+            "financing_variance": round(financing_variance, 2),
+            "flags": row_flags,
+        })
+        total_ni += ni
+        total_div += div
+        total_operating += op
+        total_investing += iv
+        total_financing += fn
+
+    total_cash = sum(cash_by_co.values())
+    prior_total_div = sum(prior_div_by_co.values())
+
+    # Prior-period net income (for KPI delta) — single consolidated call
+    prior_total_ni = 0.0
+    if req.compare_prior_period and company_ids:
+        for co in co_rows:
+            try:
+                pl_prior = await get_profit_loss(
+                    ReportParams(company_id=co["id"], start_date=prior_start, end_date=prior_end),
+                    authorization,
+                )
+                prior_total_ni += _extract_pl_net_income(pl_prior)
+            except Exception:
+                pass
+
+    # Shareholder share_of_total + concentration flag
+    for sid, s in by_shareholder_map.items():
+        s["total_paid"] = round(s["total_paid"], 2)
+        s["share_of_total"] = round((s["total_paid"] / total_div) if total_div > 0 else 0.0, 4)
+        if s["share_of_total"] > 0.5 and total_div > 0:
+            flags.append({
+                "kind": "concentration", "scope": "shareholder",
+                "id": sid, "label": s["shareholder_name"],
+                "message": f"{s['shareholder_name']} accounts for {s['share_of_total']*100:.0f}% of distributions this period.",
+            })
+
+    # KPIs
+    payout_ratio = (total_div / total_ni) if total_ni > 0 else None
+    # Cash runway: cash_on_hand / trailing-3-month avg dividends (use period-scaled)
+    monthly_avg_all = (total_div / max(period_days, 1)) * 30 if total_div else 0
+    cash_runway = (total_cash / monthly_avg_all) if monthly_avg_all > 0 else None
+    cash_conversion = (total_operating / total_ni) if total_ni > 0 else None
+    if cash_conversion is not None and (cash_conversion < 0.5 or cash_conversion > 1.5):
+        flags.append({
+            "kind": "cash_conversion_off", "scope": "org",
+            "id": None, "label": "Cash Conversion",
+            "message": f"Operating cash / net income = {cash_conversion:.2f} — expected 0.5–1.5.",
+        })
+
+    kpis = {
+        "cash_on_hand": {"current": round(total_cash, 2), "delta_vs_period_start": None},
+        "net_income": {"current": round(total_ni, 2), "prior": round(prior_total_ni, 2) if req.compare_prior_period else None},
+        "dividends_paid": {"current": round(total_div, 2), "prior": round(prior_total_div, 2) if req.compare_prior_period else None},
+        "payout_ratio": None if payout_ratio is None else round(payout_ratio, 4),
+        "distributable_remainder": round(total_ni - total_div, 2),
+        "cash_runway_months": None if cash_runway is None else round(cash_runway, 1),
+        "cash_conversion": None if cash_conversion is None else round(cash_conversion, 4),
+    }
+
+    # Monthly trend: SQL for dividends; delegate to revenue-trend logic for NI
+    trend_months = max(1, min(int(req.trend_months or 12), 24))
+    # Build [(year, month, label), ...] for the last N months ending last complete month
+    now = datetime.now()
+    lm_month = (now.month - 1) or 12
+    lm_year = now.year if now.month > 1 else now.year - 1
+    months = []
+    for i in range(trend_months - 1, -1, -1):
+        total_m = lm_year * 12 + lm_month - i
+        y = (total_m - 1) // 12
+        m = ((total_m - 1) % 12) + 1
+        months.append((y, m))
+
+    # Monthly dividends from SQL
+    monthly_div = {}
+    db = get_db()
+    ph = ",".join("?" for _ in company_ids) if company_ids else ""
+    q = (
+        "SELECT substr(event_date,1,7) AS ym, SUM(amount) AS total "
+        "FROM shareholder_dividend_events "
+        "WHERE org_id = ? AND kind = 'payment' "
+        "AND qbo_post_status IN ('posted','skipped') "
+        + (f"AND company_id IN ({ph}) " if company_ids else "")
+        + "GROUP BY substr(event_date,1,7)"
+    )
+    params = (org_id, *(company_ids if company_ids else ()))
+    for r in db.execute(q, params).fetchall():
+        monthly_div[r["ym"]] = float(r["total"] or 0)
+    db.close()
+
+    # Monthly NI: call P&L per company per month. Cheap when few companies
+    # in the local preview DB; for larger orgs this is where caching
+    # (company_reports) already helps on the QBO side.
+    trend = []
+    for (y, m) in months:
+        last_day = calendar.monthrange(y, m)[1]
+        s = f"{y}-{m:02d}-01"
+        e = f"{y}-{m:02d}-{last_day:02d}"
+        ym = f"{y}-{m:02d}"
+        ni_month = 0.0
+        for co in co_rows:
+            try:
+                pl_m = await get_profit_loss(
+                    ReportParams(company_id=co["id"], start_date=s, end_date=e),
+                    authorization,
+                )
+                ni_month += _extract_pl_net_income(pl_m)
+            except Exception:
+                pass
+        div_month = monthly_div.get(ym, 0.0)
+        trend.append({
+            "month": ym,
+            "label": f"{calendar.month_abbr[m]} {y}",
+            "net_income": round(ni_month, 2),
+            "dividends_paid": round(div_month, 2),
+            "payout_ratio": round(div_month / ni_month, 4) if ni_month > 0 else None,
+        })
+
+    return {
+        "period": {"start_date": period_start, "end_date": period_end, "macro": req.date_macro, "label": period_label},
+        "compare_period": (
+            {"start_date": prior_start, "end_date": prior_end, "label": prior_label}
+            if req.compare_prior_period else None
+        ),
+        "kpis": kpis,
+        "flags": flags,
+        "by_company": by_company,
+        "by_shareholder": list(by_shareholder_map.values()),
+        "trend_monthly": trend,
+        "totals": {
+            "cash_on_hand": round(total_cash, 2),
+            "net_income": round(total_ni, 2),
+            "dividends_paid": round(total_div, 2),
+            "operating_cash": round(total_operating, 2),
+            "investing_cash": round(total_investing, 2),
+            "financing_cash": round(total_financing, 2),
+        },
+    }
 
 
 # =====================================================================
