@@ -330,7 +330,7 @@ def init_db():
             event_date TEXT NOT NULL,
             amount REAL NOT NULL,
             kind TEXT NOT NULL DEFAULT 'payment'
-                CHECK (kind IN ('payment','declaration','adjustment')),
+                CHECK (kind IN ('payment','declaration','adjustment','managing_bonus')),
             drawing_account_name TEXT,
             cash_account_name TEXT,
             memo TEXT,
@@ -352,6 +352,32 @@ def init_db():
             ON shareholder_dividend_events(shareholder_id, event_date DESC);
         CREATE INDEX IF NOT EXISTS idx_sde_org_company
             ON shareholder_dividend_events(org_id, company_id);
+        CREATE TABLE IF NOT EXISTS shareholder_share_allocations (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL,
+            shareholder_id TEXT NOT NULL,
+            effective_date TEXT NOT NULL,     -- YYYY-MM-DD; allocation valid from this date
+            shares_held REAL NOT NULL DEFAULT 0,
+            ownership_pct REAL,               -- optional cached fraction (0..1)
+            dividend_per_share REAL,          -- DPS snapshot for the period
+            mb_amount REAL DEFAULT 0,         -- managing-bonus allocation for the period
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (shareholder_id, effective_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ssa_org_date
+            ON shareholder_share_allocations(org_id, effective_date DESC);
+        CREATE INDEX IF NOT EXISTS idx_ssa_shareholder
+            ON shareholder_share_allocations(shareholder_id, effective_date DESC);
+        CREATE TABLE IF NOT EXISTS shareholder_alias_map (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL,
+            alias_kind TEXT NOT NULL CHECK (alias_kind IN ('shareholder','company')),
+            source_label TEXT NOT NULL,       -- e.g. 'Howie Ewe', 'SHG'
+            target_id TEXT NOT NULL,          -- shareholder_id or company_id
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (org_id, alias_kind, source_label)
+        );
     """)
 
     # Safe column additions
@@ -3703,11 +3729,12 @@ class DividendEventIn(BaseModel):
     company_id: str
     event_date: str  # YYYY-MM-DD
     amount: float
-    kind: Optional[str] = "payment"  # 'payment' | 'declaration' | 'adjustment'
+    kind: Optional[str] = "payment"  # 'payment'|'declaration'|'adjustment'|'managing_bonus'
     drawing_account_name: Optional[str] = None  # auto-resolved from default link if omitted
     cash_account_name: Optional[str] = None     # required if post_to_qbo=true
     memo: Optional[str] = None
     post_to_qbo: Optional[bool] = True
+    source: Optional[str] = None                # 'manual'|'import'|'sync' — default inferred
 
 
 class DividendImportRow(BaseModel):
@@ -4162,15 +4189,19 @@ async def create_dividend_event(req: DividendEventIn, authorization: str = Heade
         raise HTTPException(status_code=400, detail="cash_account_name is required when post_to_qbo=true")
 
     eid = str(uuid.uuid4())
+    default_source = "import" if not req.post_to_qbo and (req.source is None) else "manual"
+    source_val = (req.source or default_source)
+    if source_val not in ("manual", "import", "sync"):
+        source_val = "manual"
     db.execute(
         """INSERT INTO shareholder_dividend_events
            (id, org_id, shareholder_id, company_id, event_date, amount, kind,
             drawing_account_name, cash_account_name, memo, source,
             qbo_post_status, created_by_user_id, created_by_name)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (eid, org_id, req.shareholder_id, req.company_id, req.event_date,
          float(req.amount), req.kind or "payment",
-         drawing_name, req.cash_account_name, req.memo,
+         drawing_name, req.cash_account_name, req.memo, source_val,
          "pending" if req.post_to_qbo else "skipped",
          user["id"], user.get("name") or user.get("email")),
     )
@@ -4501,7 +4532,7 @@ async def profit_dividend_cash(req: ReconcileQuery, authorization: str = Header(
 
     # Pull dividend totals once for the period
     evt_clause = [
-        "org_id = ?", "kind = 'payment'",
+        "org_id = ?", "kind IN ('payment','managing_bonus')",
         "qbo_post_status IN ('posted','skipped')",
     ]
     evt_params = [org_id]
@@ -4615,6 +4646,253 @@ async def profit_dividend_cash(req: ReconcileQuery, authorization: str = Header(
             "financing_variance": round(totals["financing_cash"] - (-totals["dividends_paid"]), 2),
         },
     }
+
+
+# =====================================================================
+#  SHARE ALLOCATIONS + ALIAS MAPS
+# =====================================================================
+#
+# Ownership snapshots (shares_held, DPS, MB) per shareholder per
+# effective-date. Used to compute expected pro-rata dividends and
+# per-shareholder valuation. Also stores a free-form alias map so the
+# xlsx importer (and ad-hoc admin input) can match messy source
+# labels to our canonical records.
+
+class ShareAllocationIn(BaseModel):
+    shareholder_id: str
+    effective_date: str        # YYYY-MM-DD
+    shares_held: float
+    ownership_pct: Optional[float] = None
+    dividend_per_share: Optional[float] = None
+    mb_amount: Optional[float] = 0
+    notes: Optional[str] = None
+
+
+def _row_to_allocation(row) -> dict:
+    return {
+        "id": row["id"],
+        "shareholder_id": row["shareholder_id"],
+        "effective_date": row["effective_date"],
+        "shares_held": row["shares_held"],
+        "ownership_pct": row["ownership_pct"],
+        "dividend_per_share": row["dividend_per_share"],
+        "mb_amount": row["mb_amount"],
+        "notes": row["notes"],
+        "created_at": row["created_at"],
+    }
+
+
+@app.get("/api/share-allocations")
+async def list_share_allocations(
+    shareholder_id: Optional[str] = None,
+    as_of: Optional[str] = None,
+    authorization: str = Header(None),
+):
+    """List share allocations for the org. Optional filters:
+    - shareholder_id: limit to one person
+    - as_of: YYYY-MM-DD → for each shareholder return the most recent
+      allocation with effective_date <= as_of (their 'active' allocation).
+    Without as_of, returns every snapshot.
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    if as_of:
+        rows = db.execute(
+            """SELECT a.*, s.display_name AS shareholder_name
+               FROM shareholder_share_allocations a
+               LEFT JOIN shareholders s ON s.id = a.shareholder_id
+               WHERE a.org_id = ? AND a.effective_date <= ?
+               ORDER BY a.shareholder_id, a.effective_date DESC""",
+            (org_id, as_of),
+        ).fetchall()
+        # Reduce to latest per shareholder
+        seen = {}
+        for r in rows:
+            sid = r["shareholder_id"]
+            if sid in seen: continue
+            if shareholder_id and sid != shareholder_id: continue
+            seen[sid] = r
+        out = []
+        for r in seen.values():
+            a = _row_to_allocation(r)
+            a["shareholder_name"] = r["shareholder_name"]
+            out.append(a)
+        db.close()
+        return out
+    # Full history
+    clauses = ["a.org_id = ?"]
+    params = [org_id]
+    if shareholder_id:
+        clauses.append("a.shareholder_id = ?"); params.append(shareholder_id)
+    rows = db.execute(
+        f"""SELECT a.*, s.display_name AS shareholder_name
+            FROM shareholder_share_allocations a
+            LEFT JOIN shareholders s ON s.id = a.shareholder_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY a.effective_date DESC, s.display_name""",
+        tuple(params),
+    ).fetchall()
+    db.close()
+    out = []
+    for r in rows:
+        a = _row_to_allocation(r)
+        a["shareholder_name"] = r["shareholder_name"]
+        out.append(a)
+    return out
+
+
+@app.post("/api/share-allocations")
+async def create_share_allocation(req: ShareAllocationIn, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    sh = db.execute(
+        "SELECT id FROM shareholders WHERE id = ? AND org_id = ?",
+        (req.shareholder_id, org_id),
+    ).fetchone()
+    if not sh:
+        db.close()
+        raise HTTPException(status_code=404, detail="Shareholder not found")
+    aid = str(uuid.uuid4())
+    try:
+        db.execute(
+            """INSERT INTO shareholder_share_allocations
+               (id, org_id, shareholder_id, effective_date, shares_held,
+                ownership_pct, dividend_per_share, mb_amount, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (aid, org_id, req.shareholder_id, req.effective_date,
+             float(req.shares_held or 0),
+             req.ownership_pct, req.dividend_per_share,
+             float(req.mb_amount or 0), req.notes),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        # Upsert on (shareholder_id, effective_date)
+        db.execute(
+            """UPDATE shareholder_share_allocations
+               SET shares_held = ?, ownership_pct = ?, dividend_per_share = ?,
+                   mb_amount = ?, notes = ?
+               WHERE shareholder_id = ? AND effective_date = ?""",
+            (float(req.shares_held or 0), req.ownership_pct, req.dividend_per_share,
+             float(req.mb_amount or 0), req.notes,
+             req.shareholder_id, req.effective_date),
+        )
+        db.commit()
+    row = db.execute(
+        """SELECT a.*, s.display_name AS shareholder_name
+           FROM shareholder_share_allocations a
+           LEFT JOIN shareholders s ON s.id = a.shareholder_id
+           WHERE a.shareholder_id = ? AND a.effective_date = ?""",
+        (req.shareholder_id, req.effective_date),
+    ).fetchone()
+    db.close()
+    out = _row_to_allocation(row)
+    out["shareholder_name"] = row["shareholder_name"]
+    return out
+
+
+@app.delete("/api/share-allocations/{allocation_id}")
+async def delete_share_allocation(allocation_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    row = db.execute(
+        "SELECT id FROM shareholder_share_allocations WHERE id = ? AND org_id = ?",
+        (allocation_id, org_id),
+    ).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(status_code=404, detail="Allocation not found")
+    db.execute("DELETE FROM shareholder_share_allocations WHERE id = ?", (allocation_id,))
+    db.commit()
+    db.close()
+    return {"id": allocation_id, "deleted": True}
+
+
+class AliasIn(BaseModel):
+    alias_kind: str   # 'shareholder' | 'company'
+    source_label: str
+    target_id: str
+
+
+@app.get("/api/alias-maps")
+async def list_aliases(
+    alias_kind: Optional[str] = None,
+    authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    clauses = ["org_id = ?"]
+    params = [org_id]
+    if alias_kind:
+        clauses.append("alias_kind = ?"); params.append(alias_kind)
+    rows = db.execute(
+        f"SELECT * FROM shareholder_alias_map WHERE {' AND '.join(clauses)} ORDER BY alias_kind, source_label",
+        tuple(params),
+    ).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/alias-maps")
+async def create_alias(req: AliasIn, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    if req.alias_kind not in ("shareholder", "company"):
+        raise HTTPException(status_code=400, detail="alias_kind must be 'shareholder' or 'company'")
+    aid = str(uuid.uuid4())
+    db = get_db()
+    try:
+        db.execute(
+            """INSERT INTO shareholder_alias_map (id, org_id, alias_kind, source_label, target_id)
+               VALUES (?, ?, ?, ?, ?)""",
+            (aid, org_id, req.alias_kind, req.source_label, req.target_id),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.execute(
+            "UPDATE shareholder_alias_map SET target_id = ? WHERE org_id = ? AND alias_kind = ? AND source_label = ?",
+            (req.target_id, org_id, req.alias_kind, req.source_label),
+        )
+        db.commit()
+    row = db.execute(
+        "SELECT * FROM shareholder_alias_map WHERE org_id = ? AND alias_kind = ? AND source_label = ?",
+        (org_id, req.alias_kind, req.source_label),
+    ).fetchone()
+    db.close()
+    return dict(row)
+
+
+@app.delete("/api/alias-maps/{alias_id}")
+async def delete_alias(alias_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    require_admin(user)
+    org_id = get_org_id(user)
+    db = get_db()
+    row = db.execute(
+        "SELECT id FROM shareholder_alias_map WHERE id = ? AND org_id = ?",
+        (alias_id, org_id),
+    ).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(status_code=404, detail="Alias not found")
+    db.execute("DELETE FROM shareholder_alias_map WHERE id = ?", (alias_id,))
+    db.commit()
+    db.close()
+    return {"id": alias_id, "deleted": True}
 
 
 # =====================================================================
@@ -5040,7 +5318,7 @@ async def dividend_dashboard(req: DividendDashboardQuery, authorization: str = H
         rows = db.execute(
             f"""SELECT company_id, SUM(amount) AS total
                 FROM shareholder_dividend_events
-                WHERE org_id = ? AND kind = 'payment'
+                WHERE org_id = ? AND kind IN ('payment','managing_bonus')
                   AND qbo_post_status IN ('posted','skipped')
                   AND event_date BETWEEN ? AND ?
                   AND company_id IN ({ph})
@@ -5056,6 +5334,30 @@ async def dividend_dashboard(req: DividendDashboardQuery, authorization: str = H
         prior_start, prior_end, prior_label = _prior_period(period_start, period_end)
         prior_div_by_co = _div_totals(prior_start, prior_end)
 
+    # Per-kind breakdown (pro-rata Dividend vs Managing Bonus) for the
+    # current period, so the dashboard can show the split.
+    def _kind_totals(s: str, e: str) -> dict:
+        if not company_ids:
+            return {}
+        ph = ",".join("?" for _ in company_ids)
+        rows = db.execute(
+            f"""SELECT company_id, kind, SUM(amount) AS total
+                FROM shareholder_dividend_events
+                WHERE org_id = ? AND kind IN ('payment','managing_bonus')
+                  AND qbo_post_status IN ('posted','skipped')
+                  AND event_date BETWEEN ? AND ?
+                  AND company_id IN ({ph})
+                GROUP BY company_id, kind""",
+            (org_id, s, e, *company_ids),
+        ).fetchall()
+        out = {}
+        for r in rows:
+            out.setdefault(r["company_id"], {"payment": 0.0, "managing_bonus": 0.0})
+            out[r["company_id"]][r["kind"]] = float(r["total"] or 0)
+        return out
+
+    kind_by_co = _kind_totals(period_start, period_end)
+
     # Per-shareholder aggregation for current period
     sh_rows = db.execute(
         f"""SELECT e.shareholder_id, s.display_name AS name, e.company_id, c.name AS company_name,
@@ -5063,7 +5365,7 @@ async def dividend_dashboard(req: DividendDashboardQuery, authorization: str = H
             FROM shareholder_dividend_events e
             LEFT JOIN shareholders s ON s.id = e.shareholder_id
             LEFT JOIN companies c    ON c.id = e.company_id
-            WHERE e.org_id = ? AND e.kind = 'payment'
+            WHERE e.org_id = ? AND e.kind IN ('payment','managing_bonus')
               AND e.qbo_post_status IN ('posted','skipped')
               AND e.event_date BETWEEN ? AND ?
               {('AND e.company_id IN (' + ','.join('?' for _ in company_ids) + ')') if company_ids else ''}
@@ -5162,11 +5464,14 @@ async def dividend_dashboard(req: DividendDashboardQuery, authorization: str = H
         if abs(financing_variance) > 1:
             row_flags.append("financing_variance")
 
+        kinds = kind_by_co.get(co["id"], {"payment": 0.0, "managing_bonus": 0.0})
         by_company.append({
             "company_id": co["id"], "company_name": co["name"],
             "cash_on_hand": round(cash, 2),
             "net_income": round(ni, 2),
             "dividends_paid": round(div, 2),
+            "dividends_pro_rata": round(kinds.get("payment", 0.0), 2),
+            "managing_bonus_paid": round(kinds.get("managing_bonus", 0.0), 2),
             "payout_ratio": None if payout is None else round(payout, 4),
             "distributable_remainder": round(distributable, 2),
             "operating_cash": round(op, 2),
@@ -5197,15 +5502,82 @@ async def dividend_dashboard(req: DividendDashboardQuery, authorization: str = H
             except Exception:
                 pass
 
-    # Shareholder share_of_total + concentration flag
+    # Per-shareholder pro-rata ($ payment kind only) + MB actual totals
+    pro_rata_by_sh = {}
+    mb_by_sh = {}
+    _sh_kind_rows = db_sh_kind = None
+    try:
+        db_sh_kind = get_db()
+        _sh_kind_rows = db_sh_kind.execute(
+            f"""SELECT shareholder_id, kind, SUM(amount) AS total
+                FROM shareholder_dividend_events
+                WHERE org_id = ? AND kind IN ('payment','managing_bonus')
+                  AND qbo_post_status IN ('posted','skipped')
+                  AND event_date BETWEEN ? AND ?
+                  {('AND company_id IN (' + ','.join('?' for _ in company_ids) + ')') if company_ids else ''}
+                GROUP BY shareholder_id, kind""",
+            (org_id, period_start, period_end, *(company_ids if company_ids else ())),
+        ).fetchall()
+    finally:
+        if db_sh_kind: db_sh_kind.close()
+    for r in (_sh_kind_rows or []):
+        if r["kind"] == "payment":
+            pro_rata_by_sh[r["shareholder_id"]] = float(r["total"] or 0)
+        else:
+            mb_by_sh[r["shareholder_id"]] = float(r["total"] or 0)
+
+    # Active share allocation as of period_end — used for expected pro-rata
+    db_alloc = get_db()
+    alloc_rows = db_alloc.execute(
+        """SELECT shareholder_id, MAX(effective_date) AS eff, shares_held, ownership_pct, dividend_per_share, mb_amount
+           FROM shareholder_share_allocations
+           WHERE org_id = ? AND effective_date <= ?
+           GROUP BY shareholder_id""",
+        (org_id, period_end),
+    ).fetchall()
+    db_alloc.close()
+    alloc_by_sh = {}
+    for r in alloc_rows:
+        alloc_by_sh[r["shareholder_id"]] = {
+            "shares_held": float(r["shares_held"] or 0),
+            "ownership_pct": float(r["ownership_pct"]) if r["ownership_pct"] is not None else None,
+            "dividend_per_share": float(r["dividend_per_share"]) if r["dividend_per_share"] is not None else None,
+            "mb_amount": float(r["mb_amount"] or 0),
+        }
+
+    # Shareholder share_of_total + concentration flag + pro-rata variance
     for sid, s in by_shareholder_map.items():
         s["total_paid"] = round(s["total_paid"], 2)
         s["share_of_total"] = round((s["total_paid"] / total_div) if total_div > 0 else 0.0, 4)
+        s["pro_rata_paid"] = round(pro_rata_by_sh.get(sid, 0.0), 2)
+        s["managing_bonus_paid"] = round(mb_by_sh.get(sid, 0.0), 2)
+        alloc = alloc_by_sh.get(sid)
+        s["allocation"] = alloc
+        # Expected pro-rata = shares × DPS (from most recent allocation <= period_end)
+        if alloc and alloc.get("shares_held") and alloc.get("dividend_per_share") is not None:
+            expected = alloc["shares_held"] * alloc["dividend_per_share"]
+        elif alloc and alloc.get("ownership_pct") is not None and total_pro_rata > 0:
+            expected = alloc["ownership_pct"] * total_pro_rata
+        else:
+            expected = None
+        s["expected_pro_rata"] = None if expected is None else round(expected, 2)
+        s["pro_rata_variance"] = None if expected is None else round(s["pro_rata_paid"] - expected, 2)
+
         if s["share_of_total"] > 0.5 and total_div > 0:
             flags.append({
                 "kind": "concentration", "scope": "shareholder",
                 "id": sid, "label": s["shareholder_name"],
                 "message": f"{s['shareholder_name']} accounts for {s['share_of_total']*100:.0f}% of distributions this period.",
+            })
+        if s["pro_rata_variance"] is not None and abs(s["pro_rata_variance"]) >= 1:
+            flags.append({
+                "kind": "pro_rata_variance", "scope": "shareholder",
+                "id": sid, "label": s["shareholder_name"],
+                "message": (
+                    f"{s['shareholder_name']}: pro-rata variance "
+                    f"${s['pro_rata_variance']:+,.0f} vs expected ${expected:,.0f} "
+                    f"(paid ${s['pro_rata_paid']:,.0f})."
+                ),
             })
 
     # KPIs
@@ -5221,10 +5593,14 @@ async def dividend_dashboard(req: DividendDashboardQuery, authorization: str = H
             "message": f"Operating cash / net income = {cash_conversion:.2f} — expected 0.5–1.5.",
         })
 
+    total_pro_rata = sum((k.get("payment", 0.0) for k in kind_by_co.values()), 0.0)
+    total_mb = sum((k.get("managing_bonus", 0.0) for k in kind_by_co.values()), 0.0)
     kpis = {
         "cash_on_hand": {"current": round(total_cash, 2), "delta_vs_period_start": None},
         "net_income": {"current": round(total_ni, 2), "prior": round(prior_total_ni, 2) if req.compare_prior_period else None},
         "dividends_paid": {"current": round(total_div, 2), "prior": round(prior_total_div, 2) if req.compare_prior_period else None},
+        "dividends_pro_rata": {"current": round(total_pro_rata, 2)},
+        "managing_bonus_paid": {"current": round(total_mb, 2)},
         "payout_ratio": None if payout_ratio is None else round(payout_ratio, 4),
         "distributable_remainder": round(total_ni - total_div, 2),
         "cash_runway_months": None if cash_runway is None else round(cash_runway, 1),
@@ -5251,7 +5627,7 @@ async def dividend_dashboard(req: DividendDashboardQuery, authorization: str = H
     q = (
         "SELECT substr(event_date,1,7) AS ym, SUM(amount) AS total "
         "FROM shareholder_dividend_events "
-        "WHERE org_id = ? AND kind = 'payment' "
+        "WHERE org_id = ? AND kind IN ('payment','managing_bonus') "
         "AND qbo_post_status IN ('posted','skipped') "
         + (f"AND company_id IN ({ph}) " if company_ids else "")
         + "GROUP BY substr(event_date,1,7)"
