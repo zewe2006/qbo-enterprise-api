@@ -7942,7 +7942,7 @@ async def sync_coa_classification(
             patch["qbo_account_id"] = qid
         if patch:
             try:
-                await _sb_update("chart_of_accounts", {"id": row["id"]}, patch)
+                await _sb_update("chart_of_accounts", {"id": f"eq.{row['id']}"}, patch)
                 row.update(patch)
                 updated += 1
             except Exception as e:
@@ -7960,7 +7960,7 @@ async def sync_coa_classification(
         parent = qid_to_row.get(pref)
         if child and parent and child.get("parent_id") != parent["id"]:
             try:
-                await _sb_update("chart_of_accounts", {"id": child["id"]},
+                await _sb_update("chart_of_accounts", {"id": f"eq.{child['id']}"},
                                  {"parent_id": parent["id"]})
                 linked += 1
             except Exception as e:
@@ -8580,7 +8580,7 @@ async def _auto_map_qbo_to_coa(
                     patch["subtype"] = subtype
                 if patch:
                     try:
-                        await _sb_update("chart_of_accounts", {"id": m["id"]}, patch)
+                        await _sb_update("chart_of_accounts", {"id": f"eq.{m['id']}"}, patch)
                         m.update(patch)
                     except Exception as e:
                         logger.debug("CoA classify backfill failed for %s: %s", qname, str(e)[:150])
@@ -8656,7 +8656,7 @@ async def _auto_map_qbo_to_coa(
                 parent = qbo_to_coa.get(pref)
                 if child and parent and child.get("parent_id") != parent["id"]:
                     try:
-                        await _sb_update("chart_of_accounts", {"id": child["id"]},
+                        await _sb_update("chart_of_accounts", {"id": f"eq.{child['id']}"},
                                          {"parent_id": parent["id"]})
                     except Exception as e:
                         logger.debug("CoA parent link failed: %s", str(e)[:150])
