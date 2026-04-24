@@ -8118,7 +8118,12 @@ async def import_qbo_to_manual(body: QboImportRequest, authorization: str = Head
                 if not acct_name:
                     totals["skipped"] += 1
                     continue
+                # QBO GL reports sub-accounts as "Parent:Child" — try exact first,
+                # then fall back to the leaf name.
                 coa_id = name_to_coa_id.get(acct_name.lower())
+                if not coa_id and ":" in acct_name:
+                    leaf = acct_name.rsplit(":", 1)[-1].strip().lower()
+                    coa_id = name_to_coa_id.get(leaf)
                 category_id = cat_by_coa.get(coa_id) if coa_id else None
 
                 # QBO GL column keys: look for common names
@@ -8151,10 +8156,10 @@ async def import_qbo_to_manual(body: QboImportRequest, authorization: str = Head
                 # Plaid convention: positive = outflow; amount = debit - credit
                 amount = round(debit - credit, 2)
 
-                # Synthetic stable id. Include account_name so the same GL row
-                # appearing under two account sections (shouldn't happen but safe)
-                # gets distinct ids.
-                tx_id = f"qbo:{src_dict['id']}:{m_start}:{idx}:{acct_name[:40]}"
+                # Synthetic stable id. Include the full account_name so sub-account
+                # paths like "Purchase:Food" don't get truncated and lost during
+                # later leaf-name lookups. Cap at 120 chars as a safety.
+                tx_id = f"qbo:{src_dict['id']}:{m_start}:{idx}:{acct_name[:120]}"
                 # The plaid_txn_id column has UNIQUE constraint across the whole
                 # transactions table. To keep rerun idempotent we include company.
                 plaid_txn_id = tx_id
