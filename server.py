@@ -2433,6 +2433,8 @@ async def _collect_plaid_reports(
             elif report_kind == "balance_sheet":
                 rpt = await _plaid_balance_sheet(
                     c["supabase_company_id"], end, org_id=org_id,
+                    summarize_column_by=getattr(params, "summarize_column_by", None),
+                    start_date=start if getattr(params, "summarize_column_by", None) else None,
                 )
             elif report_kind == "cash_flow":
                 rpt = await _plaid_cash_flow(c["supabase_company_id"], start, end)
@@ -2622,9 +2624,11 @@ async def get_balance_sheet(params: ReportParams, authorization: str = Header(No
     if params.company_id and params.company_id != "all":
         mc = await _manual_company_by_id(params.company_id, org_id)
         if mc:
-            _, end = _plaid_period(params)
+            start, end = _plaid_period(params)
             rpt = await _plaid_balance_sheet(
                 mc["supabase_company_id"], end, org_id=org_id,
+                summarize_column_by=params.summarize_column_by,
+                start_date=start if params.summarize_column_by else None,
             )
             return {"current": rpt, "source": "plaid",
                     "companies": [{"name": mc["name"], "company_id": mc["id"]}]}
@@ -7453,32 +7457,42 @@ async def _find_qbo_source_for_manual(sb_company_id: str, org_id: str) -> Option
 
 
 async def _plaid_balance_sheet(sb_company_id: str, as_of: str,
-                               org_id: Optional[str] = None) -> dict:
+                               org_id: Optional[str] = None,
+                               summarize_column_by: Optional[str] = None,
+                               start_date: Optional[str] = None) -> dict:
     """QBO-shaped Balance Sheet for a manual company.
 
     If the company was populated by a QBO → Manual import AND that QBO company
     is still connected, we fetch the BS live from QBO (authoritative, balances).
     Otherwise we reconstruct from Supabase transactions using double-entry sign
     conventions — accurate only when opening balances are present in the data.
+
+    When summarize_column_by is Month/Quarter/Year, QBO returns one column per
+    period ending at each period-close (plus a Total column).
     """
     # Preferred path: delegate to QBO when the source company is known + connected.
     if org_id:
         src = await _find_qbo_source_for_manual(sb_company_id, org_id)
         if src:
             try:
+                qbo_params = {"end_date": as_of, "accounting_method": "Accrual"}
+                if summarize_column_by:
+                    qbo_params["summarize_column_by"] = summarize_column_by
+                    if start_date:
+                        qbo_params["start_date"] = start_date
                 db = get_db()
                 try:
                     qbo_rpt = await qbo_get_report(
-                        db, src["id"], "BalanceSheet",
-                        {"end_date": as_of, "accounting_method": "Accrual"},
+                        db, src["id"], "BalanceSheet", qbo_params,
                     )
                 finally:
                     db.close()
                 if qbo_rpt and (qbo_rpt.get("Rows") or qbo_rpt.get("rows")):
-                    # Mark as QBO-sourced so the UI can show a hint if desired.
                     hdr = qbo_rpt.setdefault("Header", {})
                     hdr["Source"] = f"qbo:{src['name']}"
                     hdr["EndPeriod"] = as_of
+                    if summarize_column_by:
+                        hdr["SummarizeColumnsBy"] = summarize_column_by
                     return qbo_rpt
             except Exception as e:
                 logger.warning("QBO BS fallback failed, using Supabase: %s", str(e)[:200])
