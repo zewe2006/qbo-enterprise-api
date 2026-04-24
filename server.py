@@ -7684,11 +7684,15 @@ _COA_CODE_PREFIX_BY_TYPE = {
 }
 
 
-async def _auto_map_qbo_to_coa(sb_company_id: str, qbo_accounts: list, manual_coa: list) -> tuple:
+async def _auto_map_qbo_to_coa(
+    sb_company_id: str, qbo_accounts: list, manual_coa: list, preview: bool = False,
+) -> tuple:
     """Build a mapping from QBO account name (lowercased) → manual CoA id.
     Exact-name matches reuse an existing CoA row. For anything else, CREATE a
-    new CoA row in Supabase so every QBO account has a real destination
-    (instead of collapsing everything into Uncategorized).
+    new CoA row in Supabase so every QBO account has a real destination.
+
+    When preview=True: does NOT write to Supabase. Returns simulated plan with
+    placeholder ids of the form "PREVIEW:<code>" so callers can identify them.
 
     Returns (name_to_coa_id, created_accounts_summary).
     """
@@ -7727,21 +7731,25 @@ async def _auto_map_qbo_to_coa(sb_company_id: str, qbo_accounts: list, manual_co
                     code = candidate
                     break
 
-        try:
-            new_row = await _sb_insert("chart_of_accounts", {
-                "company_id": sb_company_id,
-                "code": code,
-                "name": qname,
-                "type": coa_type,
-                "is_active": True,
-            })
-        except HTTPException as e:
-            logger.warning("CoA create failed for %s (%s): %s", qname, code, e.detail)
-            continue
+        if preview:
+            new_id = f"PREVIEW:{code}"
+        else:
+            try:
+                new_row = await _sb_insert("chart_of_accounts", {
+                    "company_id": sb_company_id,
+                    "code": code,
+                    "name": qname,
+                    "type": coa_type,
+                    "is_active": True,
+                })
+            except HTTPException as e:
+                logger.warning("CoA create failed for %s (%s): %s", qname, code, e.detail)
+                continue
+            new_id = new_row["id"]
+            coa_by_name[qname.lower()] = new_row
 
         existing_codes.add(code)
-        coa_by_name[qname.lower()] = new_row
-        name_to_coa_id[qname.lower()] = new_row["id"]
+        name_to_coa_id[qname.lower()] = new_id
         created.append({
             "qbo_name": qname,
             "qbo_type": qtype,
@@ -7851,6 +7859,7 @@ class QboImportRequest(BaseModel):
     start_date: str  # YYYY-MM-DD
     end_date: str
     accounting_method: Optional[str] = "Accrual"
+    preview: Optional[bool] = False  # dry-run; no Supabase writes
 
 
 @app.post("/api/import/qbo-to-manual")
@@ -7907,9 +7916,30 @@ async def import_qbo_to_manual(body: QboImportRequest, authorization: str = Head
         "select": "id,code,name,type",
     })
 
-    # 3) Build the mapping (auto-creates missing CoA rows)
+    # Compute months up-front (validates the range, used for both preview and real run)
+    months = _month_range(body.start_date, body.end_date)
+
+    # Preview mode: compute what we WOULD do, write nothing, return plan.
+    if body.preview:
+        _, planned_creates = await _auto_map_qbo_to_coa(
+            sb_company_id, qbo_accounts, manual_coa, preview=True,
+        )
+        return {
+            "preview": True,
+            "source_company": src_dict["name"],
+            "dest_company": dest_dict["name"],
+            "start_date": body.start_date,
+            "end_date": body.end_date,
+            "months_to_process": len(months),
+            "qbo_account_count": len(qbo_accounts),
+            "existing_match_count": len(qbo_accounts) - len(planned_creates),
+            "new_coa_count": len(planned_creates),
+            "new_coas": planned_creates[:100],
+        }
+
+    # 3) Real run: build the mapping (auto-creates missing CoA rows)
     name_to_coa_id, created_accounts = await _auto_map_qbo_to_coa(
-        sb_company_id, qbo_accounts, manual_coa,
+        sb_company_id, qbo_accounts, manual_coa, preview=False,
     )
 
     # 3a) Refresh categories after CoA creation — the CoA→category mirror
@@ -7926,7 +7956,6 @@ async def import_qbo_to_manual(body: QboImportRequest, authorization: str = Head
     )
 
     # 5) For each month chunk, pull GL and upsert
-    months = _month_range(body.start_date, body.end_date)
     totals = {"imported": 0, "skipped": 0, "months_processed": 0}
     db = get_db()
     try:
