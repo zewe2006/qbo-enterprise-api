@@ -6863,36 +6863,108 @@ async def _plaid_pl(sb_company_id: str, start_date: str, end_date: str) -> dict:
 
 
 async def _plaid_balance_sheet(sb_company_id: str, as_of: str) -> dict:
-    """QBO-shaped Balance Sheet from Plaid bank balances + retained earnings."""
-    accounts = await _sb_select("accounts", {
-        "company_id": f"eq.{sb_company_id}",
-        "select": "id,name,type,subtype,current_balance,available_balance,currency",
-    })
-    asset_rows = [
-        {"name": a["name"], "total": float(a.get("current_balance") or 0)}
-        for a in accounts if (a.get("type") or "").lower() in ("depository", "investment")
-    ]
-    liability_rows = [
-        # Credit card balances are typically reported negative by Plaid; flip for BS.
-        {"name": a["name"], "total": abs(float(a.get("current_balance") or 0))}
-        for a in accounts if (a.get("type") or "").lower() in ("credit", "loan")
-    ]
+    """QBO-shaped Balance Sheet aggregated from transactions by CoA type.
 
-    total_assets = sum(r["total"] for r in asset_rows)
-    total_liabilities = sum(r["total"] for r in liability_rows)
+    Uses standard accounting sign conventions:
+      - Assets: raw (debit positive, credit negative) → debit balance
+      - Liabilities/Equity: flipped (credit positive, debit negative) → credit balance
+      - Retained Earnings: Net Income (all-time up to as_of)
 
-    pl = await _plaid_pl(sb_company_id, "1900-01-01", as_of)
-    # Pull net income from the synthesized P&L — find the NetIncome row
-    retained = 0.0
-    for r in pl.get("Rows", {}).get("Row", []):
-        if r.get("group") == "NetIncome":
-            try:
-                retained = float(r["Summary"]["ColData"][1]["value"])
-            except Exception:
-                retained = 0.0
+    Falls back to Plaid live account balances for bank accounts when the
+    transaction stream doesn't cover opening balances.
+    """
+    # Pull all non-transfer transactions up to as_of, paging through
+    txs: list = []
+    offset = 0
+    while True:
+        chunk = await _sb_select("transactions", {
+            "company_id": f"eq.{sb_company_id}",
+            "is_transfer": "eq.false",
+            "date": f"lte.{as_of}",
+            "select": "amount,category_id",
+            "order": "id",
+            "limit": "1000",
+            "offset": str(offset),
+        })
+        txs.extend(chunk)
+        if len(chunk) < 1000:
             break
-    equity_rows = [{"name": "Retained Earnings", "total": round(retained, 2)}]
-    total_equity = sum(r["total"] for r in equity_rows)
+        offset += 1000
+
+    # Build category → CoA lookup (categories table is auto-mirrored from CoA)
+    cats: list = []
+    offset = 0
+    while True:
+        chunk = await _sb_select("categories", {
+            "company_id": f"eq.{sb_company_id}",
+            "select": "id,coa_account_id",
+            "order": "id",
+            "limit": "500",
+            "offset": str(offset),
+        })
+        cats.extend(chunk)
+        if len(chunk) < 500:
+            break
+        offset += 500
+    cat_to_coa = {c["id"]: c.get("coa_account_id") for c in cats if c.get("coa_account_id")}
+
+    coa = await _sb_select("chart_of_accounts", {
+        "company_id": f"eq.{sb_company_id}",
+        "is_active": "eq.true",
+        "select": "id,code,name,type",
+    })
+    coa_by_id = {c["id"]: c for c in coa}
+
+    # Accumulate by CoA with accounting sign convention
+    buckets: dict = {"asset": {}, "liability": {}, "equity": {},
+                     "income": {}, "expense": {}}
+    for t in txs:
+        try:
+            amt = float(t.get("amount") or 0)
+        except Exception:
+            continue
+        cid = t.get("category_id")
+        coa_id = cat_to_coa.get(cid) if cid else None
+        row = coa_by_id.get(coa_id) if coa_id else None
+        if not row:
+            continue
+        typ = row["type"]
+        if typ not in buckets:
+            continue
+        # Credit-side account balances (liab/equity/income) are the NEGATIVE of
+        # sum(debit - credit), i.e. credit - debit.
+        if typ in ("liability", "equity", "income"):
+            amt = -amt
+        b = buckets[typ]
+        if coa_id not in b:
+            b[coa_id] = {"name": row["name"], "code": row["code"], "total": 0.0}
+        b[coa_id]["total"] += amt
+
+    # Build display rows — filter out zero balances and sort by code
+    def _rows(bucket: dict) -> list:
+        return sorted(
+            [{"name": r["name"], "code": r["code"],
+              "total": round(r["total"], 2)}
+             for r in bucket.values() if abs(r["total"]) > 0.005],
+            key=lambda r: r["code"],
+        )
+
+    asset_rows     = _rows(buckets["asset"])
+    liability_rows = _rows(buckets["liability"])
+    equity_rows    = _rows(buckets["equity"])
+
+    total_assets      = sum(r["total"] for r in asset_rows)
+    total_liabilities = sum(r["total"] for r in liability_rows)
+    total_equity_direct = sum(r["total"] for r in equity_rows)
+
+    # Retained Earnings = Net Income all-time up to as_of
+    total_income  = sum(r["total"] for r in buckets["income"].values())
+    total_expense = sum(r["total"] for r in buckets["expense"].values())
+    retained = round(total_income - total_expense, 2)
+
+    equity_rows.append({"code": "3900", "name": "Retained Earnings",
+                        "total": retained})
+    total_equity = total_equity_direct + retained
 
     return {
         "Header": {"EndPeriod": as_of, "ReportName": "BalanceSheet",
@@ -6902,13 +6974,15 @@ async def _plaid_balance_sheet(sb_company_id: str, as_of: str) -> dict:
             {"ColTitle": as_of, "ColType": "Money"},
         ]},
         "Rows": {"Row": [
-            _qbo_section("Assets", "Assets", "Total Assets", asset_rows, total_assets),
+            _qbo_section("Assets", "Assets", "Total Assets",
+                         asset_rows, total_assets),
             _qbo_section("Liabilities", "Liabilities", "Total Liabilities",
                          liability_rows, total_liabilities),
-            _qbo_section("Equity", "Equity", "Total Equity", equity_rows, total_equity),
+            _qbo_section("Equity", "Equity", "Total Equity",
+                         equity_rows, total_equity),
             _qbo_summary_row("LiabilitiesAndEquity",
                              "Total Liabilities and Equity",
-                             total_liabilities + total_equity),
+                             round(total_liabilities + total_equity, 2)),
         ]},
     }
 
