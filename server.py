@@ -5988,6 +5988,18 @@ async def _plaid_sync_transactions(sb_item: dict) -> dict:
     if not access_token or not isinstance(access_token, str):
         raise HTTPException(status_code=500, detail="Could not decrypt Plaid access token")
 
+    # Load the item's import_start_date so we can filter added rows. Plaid's
+    # /transactions/sync pulls the full available history (up to 2 years) on
+    # initial connect regardless of days_requested, so we enforce the window
+    # client-side.
+    item_rows = await _sb_select(
+        "plaid_items",
+        {"id": f"eq.{item_id}", "select": "import_start_date", "limit": "1"},
+    )
+    import_start = (item_rows[0].get("import_start_date")
+                    if item_rows and item_rows[0].get("import_start_date")
+                    else None)
+
     # Prepare categorization context: rules + categories lookup
     categories = await _sb_select(
         "categories",
@@ -6008,7 +6020,7 @@ async def _plaid_sync_transactions(sb_item: dict) -> dict:
     acct_map = {a["plaid_account_id"]: a["id"] for a in accounts if a.get("plaid_account_id")}
 
     cursor = sb_item.get("cursor")
-    totals = {"added": 0, "modified": 0, "removed": 0}
+    totals = {"added": 0, "modified": 0, "removed": 0, "skipped_before_start": 0}
     has_more = True
     iterations = 0
     while has_more and iterations < 50:  # safety cap
@@ -6024,6 +6036,11 @@ async def _plaid_sync_transactions(sb_item: dict) -> dict:
             account_row_id = acct_map.get(t.get("account_id"))
             if not account_row_id:
                 continue  # new account appeared mid-sync — skip until next sync
+            tx_date = t.get("date") or ""
+            if import_start and tx_date and tx_date < import_start:
+                # User asked to import only from import_start onward.
+                totals["skipped_before_start"] += 1
+                continue
             plaid_pfc = (t.get("personal_finance_category") or {}).get("primary")
             base_row = {
                 "id": str(uuid.uuid4()),
@@ -6965,6 +6982,48 @@ async def _plaid_balance_sheet(sb_company_id: str, as_of: str) -> dict:
     equity_rows.append({"code": "3900", "name": "Retained Earnings",
                         "total": retained})
     total_equity = total_equity_direct + retained
+
+    # --- Overlay AR/AP from invoices/bills (Phase 7) -------------------
+    # When the sales/expenses module is in use, the authoritative AR/AP
+    # balances live on `invoices.balance` / `bills.balance`. Overlay them
+    # into the asset/liability rows, replacing any raw postings to the
+    # seeded "Accounts Receivable" / "Accounts Payable" CoA to avoid
+    # double-counting.
+    try:
+        open_invs = await _sb_select("invoices", {
+            "company_id": f"eq.{sb_company_id}",
+            "status": "not.in.(paid,void)",
+            "date": f"lte.{as_of}",
+            "select": "balance",
+            "limit": "5000",
+        })
+        ar_total = round(sum(float(i.get("balance") or 0) for i in open_invs), 2)
+
+        open_bills = await _sb_select("bills", {
+            "company_id": f"eq.{sb_company_id}",
+            "status": "not.in.(paid,void)",
+            "date": f"lte.{as_of}",
+            "select": "balance",
+            "limit": "5000",
+        })
+        ap_total = round(sum(float(b.get("balance") or 0) for b in open_bills), 2)
+
+        if ar_total:
+            # Replace any existing "Accounts Receivable"-named asset row
+            asset_rows = [r for r in asset_rows if "receivable" not in r["name"].lower()]
+            asset_rows.append({"code": "1100", "name": "Accounts Receivable",
+                               "total": ar_total})
+            asset_rows.sort(key=lambda r: r["code"])
+            total_assets = round(sum(r["total"] for r in asset_rows), 2)
+
+        if ap_total:
+            liability_rows = [r for r in liability_rows if "payable" not in r["name"].lower()]
+            liability_rows.append({"code": "2000", "name": "Accounts Payable",
+                                   "total": ap_total})
+            liability_rows.sort(key=lambda r: r["code"])
+            total_liabilities = round(sum(r["total"] for r in liability_rows), 2)
+    except Exception as e:
+        logger.warning("AR/AP overlay on BS failed: %s", str(e)[:200])
 
     return {
         "Header": {"EndPeriod": as_of, "ReportName": "BalanceSheet",
@@ -8297,6 +8356,946 @@ async def import_qbo_to_manual(body: QboImportRequest, authorization: str = Head
         "source_company": src_dict["name"],
         "dest_company": dest_dict["name"],
     }
+
+
+# ---------- QBO AR/AP Import (M3) ----------
+#
+# Mirror of the transaction-level import, but for Customers, Vendors,
+# Invoices and Bills. Idempotent via qbo_id columns.
+
+
+class QboArApImportRequest(BaseModel):
+    source_qbo_company_id: str
+    dest_manual_company_id: str
+    start_date: str          # for Invoices/Bills only
+    end_date: str
+    preview: Optional[bool] = False
+
+
+def _parse_qbo_address(addr: Optional[dict]) -> Optional[dict]:
+    if not addr:
+        return None
+    return {
+        "line1": addr.get("Line1") or "",
+        "line2": addr.get("Line2") or "",
+        "city": addr.get("City") or "",
+        "region": addr.get("CountrySubDivisionCode") or addr.get("State") or "",
+        "postal_code": addr.get("PostalCode") or "",
+        "country": addr.get("Country") or "US",
+    }
+
+
+def _qbo_primary_email(e: dict) -> Optional[str]:
+    pe = e.get("PrimaryEmailAddr") or {}
+    return pe.get("Address") if isinstance(pe, dict) else None
+
+
+def _qbo_primary_phone(e: dict) -> Optional[str]:
+    p = e.get("PrimaryPhone") or {}
+    return p.get("FreeFormNumber") if isinstance(p, dict) else None
+
+
+async def _qbo_pull_all(db, src_company_id: str, entity: str,
+                        extra_where: Optional[str] = None) -> list:
+    """Page through a QBO entity list via STARTPOSITION/MAXRESULTS (max 1000)."""
+    all_items: list = []
+    start = 1
+    page_size = 500
+    while True:
+        q = f"SELECT * FROM {entity}"
+        if extra_where:
+            q += f" WHERE {extra_where}"
+        q += f" STARTPOSITION {start} MAXRESULTS {page_size}"
+        try:
+            data = await qbo_query(db, src_company_id, q)
+        except HTTPException as e:
+            logger.warning("QBO %s query failed: %s", entity, e.detail)
+            break
+        page = data.get("QueryResponse", {}).get(entity, []) or []
+        if not page:
+            break
+        all_items.extend(page)
+        if len(page) < page_size:
+            break
+        start += page_size
+        # Safety cap
+        if start > 50000:
+            break
+    return all_items
+
+
+@app.post("/api/import/qbo-ar-ap")
+async def import_qbo_ar_ap(
+    body: QboArApImportRequest, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+
+    db = get_db()
+    try:
+        src = db.execute(
+            "SELECT id, name, source, qbo_realm_id, refresh_token FROM companies "
+            "WHERE id = ? AND org_id = ? AND source = 'qbo'",
+            (body.source_qbo_company_id, org_id),
+        ).fetchone()
+        if not src:
+            raise HTTPException(status_code=404, detail="Source QBO company not found")
+        if not src["refresh_token"]:
+            raise HTTPException(status_code=400, detail="QBO company not connected")
+        dest = db.execute(
+            "SELECT id, name, source, supabase_company_id FROM companies "
+            "WHERE id = ? AND org_id = ? AND source = 'manual'",
+            (body.dest_manual_company_id, org_id),
+        ).fetchone()
+        if not dest:
+            raise HTTPException(status_code=404, detail="Destination manual company not found")
+        src_dict, dest_dict = dict(src), dict(dest)
+    finally:
+        db.close()
+
+    sb_id = dest_dict["supabase_company_id"]
+
+    # Load manual CoA for account mapping
+    manual_coa = await _sb_select("chart_of_accounts", {
+        "company_id": f"eq.{sb_id}",
+        "is_active": "eq.true",
+        "select": "id,code,name,type",
+    })
+
+    # ---- Pull QBO entities ----
+    db = get_db()
+    try:
+        qbo_accounts = (await qbo_query(
+            db, src_dict["id"],
+            "SELECT Id, Name, AccountType, AccountSubType, AcctNum, FullyQualifiedName "
+            "FROM Account WHERE Active = true MAXRESULTS 1000",
+        )).get("QueryResponse", {}).get("Account", []) or []
+        qbo_customers = await _qbo_pull_all(db, src_dict["id"], "Customer", "Active = true")
+        qbo_vendors   = await _qbo_pull_all(db, src_dict["id"], "Vendor",   "Active = true")
+        qbo_invoices  = await _qbo_pull_all(
+            db, src_dict["id"], "Invoice",
+            f"TxnDate >= '{body.start_date}' AND TxnDate <= '{body.end_date}'",
+        )
+        qbo_bills     = await _qbo_pull_all(
+            db, src_dict["id"], "Bill",
+            f"TxnDate >= '{body.start_date}' AND TxnDate <= '{body.end_date}'",
+        )
+    finally:
+        db.close()
+
+    # Account mapping — may need to create missing CoA. Preview doesn't write.
+    name_to_coa_id, created_accounts = await _auto_map_qbo_to_coa(
+        sb_id, qbo_accounts, manual_coa, preview=body.preview,
+    )
+    # Also index by QBO Account.Id for invoice/bill line resolution
+    qbo_acct_id_to_name = {a.get("Id"): (a.get("Name") or "") for a in qbo_accounts}
+
+    if body.preview:
+        return {
+            "preview": True,
+            "source_company": src_dict["name"],
+            "dest_company": dest_dict["name"],
+            "start_date": body.start_date,
+            "end_date": body.end_date,
+            "counts": {
+                "customers": len(qbo_customers),
+                "vendors":   len(qbo_vendors),
+                "invoices":  len(qbo_invoices),
+                "bills":     len(qbo_bills),
+                "new_coa":   len(created_accounts),
+            },
+            "new_coas": created_accounts[:50],
+        }
+
+    # Refresh categories after any new CoAs (mirror trigger creates them)
+    categories = await _sb_select("categories", {
+        "company_id": f"eq.{sb_id}", "select": "id,coa_account_id",
+    })
+    cat_by_coa = {c["coa_account_id"]: c["id"] for c in categories if c.get("coa_account_id")}
+
+    summary = {"customers": 0, "vendors": 0, "invoices": 0, "bills": 0,
+               "skipped_invoices": 0, "skipped_bills": 0}
+
+    # ---- Customers ----
+    qbo_cust_id_to_sb: dict = {}
+    cust_rows = []
+    for c in qbo_customers:
+        qbo_id = c.get("Id")
+        row = {
+            "company_id": sb_id,
+            "display_name": (c.get("DisplayName") or c.get("CompanyName") or "Unnamed").strip(),
+            "company_name": c.get("CompanyName"),
+            "email": _qbo_primary_email(c),
+            "phone": _qbo_primary_phone(c),
+            "billing_address": _parse_qbo_address(c.get("BillAddr")),
+            "shipping_address": _parse_qbo_address(c.get("ShipAddr")),
+            "terms_days": 30,
+            "notes": c.get("Notes"),
+            "is_active": bool(c.get("Active", True)),
+            "qbo_id": qbo_id,
+        }
+        cust_rows.append(row)
+    if cust_rows:
+        resp = await _sb_request(
+            "POST", "/customers",
+            params={"on_conflict": "company_id,qbo_id"},
+            json_body=cust_rows,
+            prefer="return=representation,resolution=merge-duplicates",
+        )
+        if resp.status_code < 300:
+            data = resp.json() if resp.text else []
+            for r in data:
+                if r.get("qbo_id"):
+                    qbo_cust_id_to_sb[r["qbo_id"]] = r["id"]
+            summary["customers"] = len(data)
+        else:
+            logger.warning("Customer upsert failed: %s", resp.text[:300])
+
+    # If upsert didn't return ids for some (dedupe by display_name unique key may have skipped),
+    # re-fetch to populate lookup
+    if len(qbo_cust_id_to_sb) < len(qbo_customers):
+        all_c = await _sb_select("customers", {
+            "company_id": f"eq.{sb_id}",
+            "select": "id,qbo_id", "limit": "5000",
+        })
+        for c in all_c:
+            if c.get("qbo_id"):
+                qbo_cust_id_to_sb.setdefault(c["qbo_id"], c["id"])
+
+    # ---- Vendors ----
+    qbo_vend_id_to_sb: dict = {}
+    vend_rows = []
+    for v in qbo_vendors:
+        row = {
+            "company_id": sb_id,
+            "display_name": (v.get("DisplayName") or v.get("CompanyName") or "Unnamed").strip(),
+            "company_name": v.get("CompanyName"),
+            "email": _qbo_primary_email(v),
+            "phone": _qbo_primary_phone(v),
+            "billing_address": _parse_qbo_address(v.get("BillAddr")),
+            "terms_days": 30,
+            "is_1099": bool(v.get("Vendor1099", False)),
+            "tax_id": v.get("TaxIdentifier"),
+            "notes": v.get("Notes"),
+            "is_active": bool(v.get("Active", True)),
+            "qbo_id": v.get("Id"),
+        }
+        vend_rows.append(row)
+    if vend_rows:
+        resp = await _sb_request(
+            "POST", "/vendors",
+            params={"on_conflict": "company_id,qbo_id"},
+            json_body=vend_rows,
+            prefer="return=representation,resolution=merge-duplicates",
+        )
+        if resp.status_code < 300:
+            data = resp.json() if resp.text else []
+            for r in data:
+                if r.get("qbo_id"):
+                    qbo_vend_id_to_sb[r["qbo_id"]] = r["id"]
+            summary["vendors"] = len(data)
+    if len(qbo_vend_id_to_sb) < len(qbo_vendors):
+        all_v = await _sb_select("vendors", {
+            "company_id": f"eq.{sb_id}",
+            "select": "id,qbo_id", "limit": "5000",
+        })
+        for v in all_v:
+            if v.get("qbo_id"):
+                qbo_vend_id_to_sb.setdefault(v["qbo_id"], v["id"])
+
+    # ---- helper to map a QBO line to a CoA / category ----
+    def _line_coa_id(qbo_account_id: Optional[str]) -> Optional[str]:
+        if not qbo_account_id:
+            return None
+        acct_name = qbo_acct_id_to_name.get(qbo_account_id) or ""
+        coa_id = name_to_coa_id.get(acct_name.lower())
+        if not coa_id and ":" in acct_name:
+            leaf = acct_name.rsplit(":", 1)[-1].strip().lower()
+            coa_id = name_to_coa_id.get(leaf)
+        return coa_id
+
+    # ---- Invoices ----
+    for inv in qbo_invoices:
+        qbo_id = inv.get("Id")
+        cust_ref = (inv.get("CustomerRef") or {}).get("value")
+        sb_cust_id = qbo_cust_id_to_sb.get(cust_ref)
+        if not sb_cust_id:
+            summary["skipped_invoices"] += 1
+            continue
+        total = float(inv.get("TotalAmt") or 0)
+        balance = float(inv.get("Balance") or 0)
+        status = "paid" if balance < 0.005 else ("partially_paid" if balance < total - 0.005 else "sent")
+        inv_row = {
+            "company_id": sb_id,
+            "customer_id": sb_cust_id,
+            "number": (inv.get("DocNumber") or f"QBO-{qbo_id}")[:50],
+            "date": inv.get("TxnDate"),
+            "due_date": inv.get("DueDate"),
+            "status": status,
+            "memo": inv.get("CustomerMemo", {}).get("value") if isinstance(inv.get("CustomerMemo"), dict) else inv.get("PrivateNote"),
+            "subtotal": round(total - float(inv.get("TxnTaxDetail", {}).get("TotalTax") or 0), 2),
+            "tax_total": round(float(inv.get("TxnTaxDetail", {}).get("TotalTax") or 0), 2),
+            "total": round(total, 2),
+            "balance": round(balance, 2),
+            "currency": (inv.get("CurrencyRef") or {}).get("value", "USD"),
+            "qbo_id": qbo_id,
+        }
+        # Upsert invoice
+        resp = await _sb_request(
+            "POST", "/invoices",
+            params={"on_conflict": "company_id,qbo_id"},
+            json_body=inv_row,
+            prefer="return=representation,resolution=merge-duplicates",
+        )
+        if resp.status_code >= 300:
+            logger.warning("Invoice upsert failed: %s", resp.text[:300])
+            summary["skipped_invoices"] += 1
+            continue
+        result = resp.json() if resp.text else []
+        sb_invoice = result[0] if isinstance(result, list) and result else None
+        if not sb_invoice:
+            summary["skipped_invoices"] += 1
+            continue
+        # Replace lines
+        await _sb_delete("invoice_lines", {"invoice_id": f"eq.{sb_invoice['id']}"})
+        line_rows = []
+        line_no = 0
+        for ln in inv.get("Line") or []:
+            if ln.get("DetailType") != "SalesItemLineDetail":
+                continue
+            d = ln.get("SalesItemLineDetail") or {}
+            acct_ref = (d.get("IncomeAccountRef") or d.get("ItemAccountRef") or {}).get("value")
+            qty = float(d.get("Qty") or 1)
+            unit_price = float(d.get("UnitPrice") or 0)
+            amount = float(ln.get("Amount") or (qty * unit_price))
+            line_no += 1
+            line_rows.append({
+                "invoice_id": sb_invoice["id"],
+                "line_no": line_no,
+                "description": ln.get("Description"),
+                "quantity": qty,
+                "unit_price": unit_price,
+                "amount": round(amount, 2),
+                "tax_rate": 0,
+                "tax_amount": 0,
+                "coa_account_id": _line_coa_id(acct_ref),
+            })
+        if line_rows:
+            await _sb_request("POST", "/invoice_lines", json_body=line_rows, prefer="return=minimal")
+        summary["invoices"] += 1
+
+    # ---- Bills ----
+    for bill in qbo_bills:
+        qbo_id = bill.get("Id")
+        vend_ref = (bill.get("VendorRef") or {}).get("value")
+        sb_vend_id = qbo_vend_id_to_sb.get(vend_ref)
+        if not sb_vend_id:
+            summary["skipped_bills"] += 1
+            continue
+        total = float(bill.get("TotalAmt") or 0)
+        balance = float(bill.get("Balance") or 0)
+        status = "paid" if balance < 0.005 else ("partially_paid" if balance < total - 0.005 else "open")
+        bill_row = {
+            "company_id": sb_id,
+            "vendor_id": sb_vend_id,
+            "number": (bill.get("DocNumber") or None),
+            "date": bill.get("TxnDate"),
+            "due_date": bill.get("DueDate"),
+            "status": status,
+            "memo": bill.get("PrivateNote"),
+            "subtotal": round(total, 2),
+            "tax_total": 0,
+            "total": round(total, 2),
+            "balance": round(balance, 2),
+            "currency": (bill.get("CurrencyRef") or {}).get("value", "USD"),
+            "qbo_id": qbo_id,
+        }
+        resp = await _sb_request(
+            "POST", "/bills",
+            params={"on_conflict": "company_id,qbo_id"},
+            json_body=bill_row,
+            prefer="return=representation,resolution=merge-duplicates",
+        )
+        if resp.status_code >= 300:
+            logger.warning("Bill upsert failed: %s", resp.text[:300])
+            summary["skipped_bills"] += 1
+            continue
+        result = resp.json() if resp.text else []
+        sb_bill = result[0] if isinstance(result, list) and result else None
+        if not sb_bill:
+            summary["skipped_bills"] += 1
+            continue
+        await _sb_delete("bill_lines", {"bill_id": f"eq.{sb_bill['id']}"})
+        line_rows = []
+        line_no = 0
+        for ln in bill.get("Line") or []:
+            if ln.get("DetailType") != "AccountBasedExpenseLineDetail":
+                continue
+            d = ln.get("AccountBasedExpenseLineDetail") or {}
+            acct_ref = (d.get("AccountRef") or {}).get("value")
+            amount = float(ln.get("Amount") or 0)
+            line_no += 1
+            line_rows.append({
+                "bill_id": sb_bill["id"],
+                "line_no": line_no,
+                "description": ln.get("Description"),
+                "quantity": 1,
+                "unit_price": amount,
+                "amount": round(amount, 2),
+                "tax_rate": 0,
+                "tax_amount": 0,
+                "coa_account_id": _line_coa_id(acct_ref),
+            })
+        if line_rows:
+            await _sb_request("POST", "/bill_lines", json_body=line_rows, prefer="return=minimal")
+        summary["bills"] += 1
+
+    return {
+        "preview": False,
+        "source_company": src_dict["name"],
+        "dest_company": dest_dict["name"],
+        **summary,
+        "new_coa_count": len(created_accounts),
+    }
+
+
+# ---------- Payment match suggestions (M4) ----------
+
+@app.get("/api/payments/match-suggestions/{plaid_txn_id}")
+async def match_suggestions(
+    plaid_txn_id: str,
+    kind: str = "invoice",  # "invoice" | "bill"
+    date_window_days: int = 14,
+    amount_tolerance_pct: float = 0.01,  # 1% of amount
+    top_n: int = 5,
+    authorization: str = Header(None),
+):
+    """Given a Plaid transaction id, suggest open invoices (for inflows) or
+    bills (for outflows) that could be this payment."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    # Load the transaction
+    tx_rows = await _sb_select("transactions", {
+        "id": f"eq.{plaid_txn_id}",
+        "select": "id,company_id,date,amount,merchant_name,description",
+        "limit": "1",
+    })
+    if not tx_rows:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    tx = tx_rows[0]
+    await _resolve_manual_company_from_supabase_id(tx["company_id"], user)
+
+    sb_id = tx["company_id"]
+    tx_amt = abs(float(tx["amount"] or 0))
+    tx_date = tx.get("date") or ""
+    merch = (tx.get("merchant_name") or tx.get("description") or "").lower()
+
+    tol = max(0.05, tx_amt * amount_tolerance_pct)
+    lo = max(0.0, tx_amt - tol)
+    hi = tx_amt + tol
+
+    # Date window
+    try:
+        from datetime import date as _d
+        tx_d = _d.fromisoformat(tx_date) if tx_date else None
+    except Exception:
+        tx_d = None
+
+    if kind == "invoice":
+        rows = await _sb_select("invoices", {
+            "company_id": f"eq.{sb_id}",
+            "status": "not.in.(paid,void)",
+            "balance": f"gte.{lo}",
+            "and": f"(balance.lte.{hi})",
+            "select": "id,number,date,due_date,total,balance,customer_id",
+            "order": "date.desc",
+            "limit": "50",
+        })
+        # Hydrate customer names
+        cust_ids = list({r["customer_id"] for r in rows if r.get("customer_id")})
+        cmap: dict = {}
+        if cust_ids:
+            cs = await _sb_select("customers", {
+                "id": f"in.({','.join(cust_ids)})",
+                "select": "id,display_name",
+            })
+            cmap = {c["id"]: c for c in cs}
+        for r in rows:
+            r["party"] = cmap.get(r.get("customer_id"))
+    else:  # bill
+        rows = await _sb_select("bills", {
+            "company_id": f"eq.{sb_id}",
+            "status": "not.in.(paid,void)",
+            "balance": f"gte.{lo}",
+            "and": f"(balance.lte.{hi})",
+            "select": "id,number,date,due_date,total,balance,vendor_id",
+            "order": "date.desc",
+            "limit": "50",
+        })
+        vend_ids = list({r["vendor_id"] for r in rows if r.get("vendor_id")})
+        vmap: dict = {}
+        if vend_ids:
+            vs = await _sb_select("vendors", {
+                "id": f"in.({','.join(vend_ids)})",
+                "select": "id,display_name",
+            })
+            vmap = {v["id"]: v for v in vs}
+        for r in rows:
+            r["party"] = vmap.get(r.get("vendor_id"))
+
+    # Score each candidate
+    def score(r):
+        amt_diff = abs(float(r["balance"]) - tx_amt)
+        s = max(0.0, 1 - amt_diff / max(tol, 0.01)) * 0.5
+        if tx_d and r.get("date"):
+            try:
+                from datetime import date as _d2
+                r_date = _d2.fromisoformat(r["date"][:10])
+                days = abs((tx_d - r_date).days)
+                s += max(0.0, 1 - days / max(date_window_days, 1)) * 0.3
+            except Exception:
+                pass
+        # Name proximity
+        name = (r.get("party") or {}).get("display_name", "").lower()
+        if merch and name and (name in merch or merch in name):
+            s += 0.2
+        return s
+
+    scored = [(r, score(r)) for r in rows]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return {
+        "transaction": {
+            "id": tx["id"], "date": tx["date"], "amount": tx["amount"],
+            "merchant_name": tx.get("merchant_name"),
+        },
+        "kind": kind,
+        "candidates": [
+            {**r, "score": round(s, 3)}
+            for r, s in scored[:top_n]
+        ],
+    }
+
+
+class MatchApplyBody(BaseModel):
+    plaid_txn_id: str
+    invoice_id: Optional[str] = None
+    bill_id: Optional[str] = None
+    amount: float
+    payment_method: Optional[str] = None
+    reference: Optional[str] = None
+    memo: Optional[str] = None
+
+
+@app.post("/api/payments/apply-match")
+async def apply_match(body: MatchApplyBody, authorization: str = Header(None)):
+    """One-click: create a payment + application from a Plaid transaction."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    if (body.invoice_id is None) == (body.bill_id is None):
+        raise HTTPException(status_code=400, detail="Exactly one of invoice_id or bill_id required")
+    tx_rows = await _sb_select("transactions", {
+        "id": f"eq.{body.plaid_txn_id}",
+        "select": "id,company_id,date,account_id", "limit": "1",
+    })
+    if not tx_rows:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    tx = tx_rows[0]
+    company = await _resolve_manual_company_from_supabase_id(tx["company_id"], user)
+
+    return await record_payment(
+        company["id"],
+        PaymentBody(
+            date=tx["date"],
+            amount=body.amount,
+            kind="invoice_payment" if body.invoice_id else "bill_payment",
+            bank_account_id=tx.get("account_id"),
+            matched_transaction_id=tx["id"],
+            payment_method=body.payment_method,
+            reference=body.reference,
+            memo=body.memo,
+            applications=[PaymentApplyBody(
+                invoice_id=body.invoice_id,
+                bill_id=body.bill_id,
+                amount=body.amount,
+            )],
+        ),
+        authorization,
+    )
+
+
+# ---------- Credit Memos (M5) ----------
+
+class CreditMemoBody(BaseModel):
+    customer_id: str
+    number: Optional[str] = None
+    date: str
+    memo: Optional[str] = None
+    lines: List[LineBody]
+
+
+@app.get("/api/credit-memos/{company_id}")
+async def list_credit_memos(company_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    rows = await _sb_select("credit_memos", {
+        "company_id": f"eq.{company['supabase_company_id']}",
+        "select": "*", "order": "date.desc", "limit": "500",
+    })
+    cust_ids = list({r["customer_id"] for r in rows if r.get("customer_id")})
+    cmap: dict = {}
+    if cust_ids:
+        cs = await _sb_select("customers", {
+            "id": f"in.({','.join(cust_ids)})", "select": "id,display_name",
+        })
+        cmap = {c["id"]: c for c in cs}
+    for r in rows:
+        r["customer"] = cmap.get(r.get("customer_id"))
+    return {"credit_memos": rows}
+
+
+@app.post("/api/credit-memos/{company_id}")
+async def create_credit_memo(
+    company_id: str, body: CreditMemoBody, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    if not body.lines:
+        raise HTTPException(status_code=400, detail="Credit memo needs at least one line")
+    subtotal, tax_total, total, lines = _compute_doc_totals(body.lines)
+    cm = await _sb_insert("credit_memos", {
+        "company_id": company["supabase_company_id"],
+        "customer_id": body.customer_id,
+        "number": body.number,
+        "date": body.date,
+        "status": "open",
+        "memo": body.memo,
+        "subtotal": subtotal, "tax_total": tax_total,
+        "total": total, "balance": total,
+    })
+    for l in lines:
+        l_row = {k: v for k, v in l.items() if k != "tax_rate" and k != "tax_amount"}
+        l_row["credit_memo_id"] = cm["id"]
+        l["credit_memo_id"] = cm["id"]
+    if lines:
+        await _sb_request(
+            "POST", "/credit_memo_lines",
+            json_body=[{k: v for k, v in l.items() if k not in ("tax_rate", "tax_amount")} for l in lines],
+            prefer="return=minimal",
+        )
+    return {"credit_memo": cm}
+
+
+class CreditMemoApplyBody(BaseModel):
+    invoice_id: str
+    amount: float
+
+
+@app.post("/api/credit-memos/{credit_memo_id}/apply")
+async def apply_credit_memo(
+    credit_memo_id: str, body: CreditMemoApplyBody, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    cm_rows = await _sb_select("credit_memos", {
+        "id": f"eq.{credit_memo_id}",
+        "select": "id,company_id,balance,total", "limit": "1",
+    })
+    if not cm_rows:
+        raise HTTPException(status_code=404, detail="Credit memo not found")
+    cm = cm_rows[0]
+    await _resolve_manual_company_from_supabase_id(cm["company_id"], user)
+    if float(cm["balance"]) < body.amount - 0.005:
+        raise HTTPException(status_code=400, detail="Credit memo balance insufficient")
+
+    inv_rows = await _sb_select("invoices", {
+        "id": f"eq.{body.invoice_id}",
+        "select": "id,company_id,balance,total", "limit": "1",
+    })
+    if not inv_rows or inv_rows[0]["company_id"] != cm["company_id"]:
+        raise HTTPException(status_code=404, detail="Invoice not found or mismatched company")
+    inv = inv_rows[0]
+    if float(inv["balance"]) < body.amount - 0.005:
+        raise HTTPException(status_code=400, detail="Invoice balance insufficient")
+
+    await _sb_insert("credit_memo_applications", {
+        "credit_memo_id": credit_memo_id,
+        "invoice_id": body.invoice_id,
+        "amount": round(body.amount, 2),
+    })
+    # Reduce both balances
+    new_cm_bal = round(float(cm["balance"]) - body.amount, 2)
+    cm_status = "applied" if new_cm_bal < 0.005 else "partially_applied"
+    await _sb_update("credit_memos", {"id": f"eq.{credit_memo_id}"},
+                     {"balance": new_cm_bal, "status": cm_status})
+    new_inv_bal = round(float(inv["balance"]) - body.amount, 2)
+    inv_status = _new_status_after_payment(float(inv["total"]), new_inv_bal, False)
+    await _sb_update("invoices", {"id": f"eq.{body.invoice_id}"},
+                     {"balance": new_inv_bal, "status": inv_status,
+                      "updated_at": datetime.now(timezone.utc).isoformat()})
+    return {"ok": True, "credit_memo_balance": new_cm_bal, "invoice_balance": new_inv_bal}
+
+
+@app.delete("/api/credit-memos/{credit_memo_id}")
+async def delete_credit_memo(credit_memo_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    rows = await _sb_select("credit_memos", {
+        "id": f"eq.{credit_memo_id}", "select": "id,company_id", "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Credit memo not found")
+    await _resolve_manual_company_from_supabase_id(rows[0]["company_id"], user)
+    # Reverse applications
+    apps = await _sb_select("credit_memo_applications", {
+        "credit_memo_id": f"eq.{credit_memo_id}", "select": "invoice_id,amount",
+    })
+    for a in apps:
+        inv_rows = await _sb_select("invoices", {
+            "id": f"eq.{a['invoice_id']}", "select": "id,total,balance", "limit": "1",
+        })
+        if inv_rows:
+            inv = inv_rows[0]
+            new_bal = round(float(inv["balance"]) + float(a["amount"]), 2)
+            new_status = _new_status_after_payment(float(inv["total"]), new_bal, False)
+            await _sb_update("invoices", {"id": f"eq.{a['invoice_id']}"},
+                             {"balance": new_bal, "status": new_status})
+    await _sb_delete("credit_memos", {"id": f"eq.{credit_memo_id}"})
+    return {"ok": True}
+
+
+# ---------- Recurring Invoices (M5) ----------
+
+class RecurringInvoiceBody(BaseModel):
+    customer_id: str
+    name: str
+    frequency: str  # weekly | monthly | quarterly | annual
+    start_date: str
+    end_date: Optional[str] = None
+    template_json: dict   # { lines: [...], memo: "...", terms: "...", due_days_offset: 0 }
+
+
+@app.get("/api/recurring-invoices/{company_id}")
+async def list_recurring_invoices(company_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    rows = await _sb_select("recurring_invoices", {
+        "company_id": f"eq.{company['supabase_company_id']}",
+        "select": "*", "order": "next_run_date.asc",
+    })
+    cust_ids = list({r["customer_id"] for r in rows if r.get("customer_id")})
+    cmap: dict = {}
+    if cust_ids:
+        cs = await _sb_select("customers", {
+            "id": f"in.({','.join(cust_ids)})", "select": "id,display_name",
+        })
+        cmap = {c["id"]: c for c in cs}
+    for r in rows:
+        r["customer"] = cmap.get(r.get("customer_id"))
+    return {"recurring_invoices": rows}
+
+
+def _next_date(current_iso: str, frequency: str) -> str:
+    from datetime import date as _d
+    d = _d.fromisoformat(current_iso)
+    if frequency == "weekly":
+        nd = d + timedelta(days=7)
+    elif frequency == "monthly":
+        m = d.month + 1
+        y = d.year + (m - 1) // 12
+        m = ((m - 1) % 12) + 1
+        last = calendar.monthrange(y, m)[1]
+        nd = d.replace(year=y, month=m, day=min(d.day, last))
+    elif frequency == "quarterly":
+        m = d.month + 3
+        y = d.year + (m - 1) // 12
+        m = ((m - 1) % 12) + 1
+        last = calendar.monthrange(y, m)[1]
+        nd = d.replace(year=y, month=m, day=min(d.day, last))
+    elif frequency == "annual":
+        try:
+            nd = d.replace(year=d.year + 1)
+        except ValueError:
+            nd = d.replace(year=d.year + 1, day=28)
+    else:
+        nd = d + timedelta(days=30)
+    return nd.isoformat()
+
+
+@app.post("/api/recurring-invoices/{company_id}")
+async def create_recurring_invoice(
+    company_id: str, body: RecurringInvoiceBody, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    if body.frequency not in ("weekly", "monthly", "quarterly", "annual"):
+        raise HTTPException(status_code=400, detail="Invalid frequency")
+    row = await _sb_insert("recurring_invoices", {
+        "company_id": company["supabase_company_id"],
+        "customer_id": body.customer_id,
+        "name": body.name,
+        "frequency": body.frequency,
+        "start_date": body.start_date,
+        "end_date": body.end_date,
+        "next_run_date": body.start_date,
+        "is_active": True,
+        "template_json": body.template_json,
+    })
+    return {"recurring_invoice": row}
+
+
+@app.delete("/api/recurring-invoices/{recurring_id}")
+async def delete_recurring_invoice(recurring_id: str, authorization: str = Header(None)):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    rows = await _sb_select("recurring_invoices", {
+        "id": f"eq.{recurring_id}", "select": "id,company_id", "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Recurring not found")
+    await _resolve_manual_company_from_supabase_id(rows[0]["company_id"], user)
+    await _sb_delete("recurring_invoices", {"id": f"eq.{recurring_id}"})
+    return {"ok": True}
+
+
+@app.post("/api/recurring-invoices/process")
+async def process_recurring_invoices(authorization: str = Header(None)):
+    """Materialize all recurring invoices whose next_run_date is <= today.
+    Creates a draft invoice for each, then advances next_run_date."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+    today = datetime.now().date().isoformat()
+
+    # Find all active recurring invoices in this user's org-accessible manual companies
+    db = get_db()
+    try:
+        sb_ids = [r["supabase_company_id"] for r in db.execute(
+            "SELECT supabase_company_id FROM companies "
+            "WHERE org_id = ? AND source = 'manual' AND supabase_company_id IS NOT NULL",
+            (org_id,),
+        ).fetchall() if r["supabase_company_id"]]
+    finally:
+        db.close()
+    if not sb_ids:
+        return {"processed": 0, "created": []}
+
+    due = await _sb_select("recurring_invoices", {
+        "company_id": f"in.({','.join(sb_ids)})",
+        "is_active": "eq.true",
+        "next_run_date": f"lte.{today}",
+        "select": "*", "limit": "1000",
+    })
+    created = []
+    for r in due:
+        template = r.get("template_json") or {}
+        lines_t = template.get("lines") or []
+        if not lines_t:
+            continue
+        due_days = int(template.get("due_days_offset") or 30)
+        try:
+            tx_date = r["next_run_date"]
+            due_date = (datetime.fromisoformat(tx_date) + timedelta(days=due_days)).date().isoformat()
+            lines_body = [LineBody(**l) for l in lines_t]
+            subtotal, tax_total, total, persisted = _compute_doc_totals(lines_body)
+            inv_row = {
+                "company_id": r["company_id"],
+                "customer_id": r["customer_id"],
+                "number": f"REC-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                "date": tx_date,
+                "due_date": due_date,
+                "status": "draft",
+                "memo": template.get("memo"),
+                "terms": template.get("terms"),
+                "subtotal": subtotal, "tax_total": tax_total,
+                "total": total, "balance": total,
+                "currency": template.get("currency", "USD"),
+            }
+            inv = await _sb_insert("invoices", inv_row)
+            for l in persisted:
+                l["invoice_id"] = inv["id"]
+            if persisted:
+                await _sb_request("POST", "/invoice_lines", json_body=persisted, prefer="return=minimal")
+            new_next = _next_date(r["next_run_date"], r["frequency"])
+            stop = r.get("end_date") and new_next > r["end_date"]
+            await _sb_update("recurring_invoices", {"id": f"eq.{r['id']}"}, {
+                "next_run_date": new_next,
+                "is_active": not stop,
+            })
+            created.append({"recurring_id": r["id"], "invoice_id": inv["id"], "number": inv_row["number"]})
+        except Exception as e:
+            logger.warning("Recurring run failed for %s: %s", r.get("id"), str(e)[:200])
+    return {"processed": len(due), "created": created}
+
+
+# ---------- Email invoice (M5) ----------
+
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+INVOICE_PDF_FROM_EMAIL = os.environ.get(
+    "INVOICE_PDF_FROM_EMAIL", "billing@consolidatedreport.app",
+)
+
+
+class EmailInvoiceBody(BaseModel):
+    to_email: str
+    subject: Optional[str] = None
+    body_html: Optional[str] = None  # optional override; otherwise we use a default template
+
+
+@app.post("/api/invoices/{invoice_id}/email")
+async def email_invoice(
+    invoice_id: str, body: EmailInvoiceBody, authorization: str = Header(None),
+):
+    if not RESEND_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Email not configured. Set RESEND_API_KEY on Railway to enable.",
+        )
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    rows = await _sb_select("invoices", {
+        "id": f"eq.{invoice_id}",
+        "select": "id,company_id,number,date,due_date,total,balance,memo,customer_id",
+        "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    inv = rows[0]
+    company = await _resolve_manual_company_from_supabase_id(inv["company_id"], user)
+
+    subject = body.subject or f"Invoice {inv.get('number') or ''} from {company['name']}".strip()
+    if not body.body_html:
+        body_html = (
+            f"<p>Thanks for your business.</p>"
+            f"<p>Invoice <strong>{inv.get('number') or ''}</strong> — total "
+            f"<strong>${float(inv['total']):.2f}</strong> — due {inv.get('due_date') or 'on receipt'}.</p>"
+            f"<p>Balance owing: <strong>${float(inv['balance']):.2f}</strong>.</p>"
+            f"<p>— {company['name']}</p>"
+        )
+    else:
+        body_html = body.body_html
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}",
+                     "Content-Type": "application/json"},
+            json={
+                "from": INVOICE_PDF_FROM_EMAIL,
+                "to": body.to_email,
+                "subject": subject,
+                "html": body_html,
+            },
+        )
+    if r.status_code >= 300:
+        logger.error("Resend send failed %s: %s", r.status_code, r.text[:300])
+        raise HTTPException(status_code=502, detail=f"Email send failed ({r.status_code})")
+    return {"ok": True, "message_id": (r.json() or {}).get("id")}
 
 
 # ---------- Categories list (for inline pickers) ----------
