@@ -2475,24 +2475,35 @@ async def get_profit_loss(params: ReportParams, authorization: str = Header(None
             if plaid_reports:
                 result = dict(result or {})
                 result["plaid_reports"] = plaid_reports
-                # Also merge Plaid into consolidated `current` so the main
-                # table sums QBO + manual companies together when not in
-                # by_company view.
-                if not params.by_company:
-                    base_cur = result.get("current")
-                    to_merge = [p["report"] for p in plaid_reports if p.get("report")]
-                    if base_cur:
-                        to_merge.insert(0, base_cur)
-                    merged = _merge_reports(to_merge) if to_merge else None
-                    if merged:
-                        result["current"] = merged
-                        # Extend companies list
-                        existing = {c.get("company_id") for c in (result.get("companies") or [])}
-                        for p in plaid_reports:
-                            if p.get("company_id") and p["company_id"] not in existing:
-                                result.setdefault("companies", []).append(
-                                    {"name": p.get("name"), "company_id": p["company_id"]}
-                                )
+
+                # Always merge Plaid into `current` so the consolidated total
+                # reflects QBO + manual companies. (by_company mode still
+                # renders per-company columns from company_breakdowns below,
+                # but the Total column comes from `current`.)
+                base_cur = result.get("current")
+                to_merge = [p["report"] for p in plaid_reports if p.get("report")]
+                if base_cur:
+                    to_merge.insert(0, base_cur)
+                merged = _merge_reports(to_merge) if to_merge else None
+                if merged:
+                    result["current"] = merged
+
+                # Extend companies list so the frontend shows Plaid names.
+                existing = {c.get("company_id") for c in (result.get("companies") or [])}
+                for p in plaid_reports:
+                    if p.get("company_id") and p["company_id"] not in existing:
+                        result.setdefault("companies", []).append(
+                            {"name": p.get("name"), "company_id": p["company_id"]}
+                        )
+
+                # By Company view: include Plaid companies in the per-company
+                # breakdown so they render as their own columns alongside QBO.
+                if params.by_company:
+                    cbs = result.setdefault("company_breakdowns", {})
+                    for p in plaid_reports:
+                        rpt = p.get("report")
+                        if rpt and p.get("name"):
+                            cbs[p["name"]] = _build_flat_lookup(rpt)
         except Exception as e:
             logger.info("Plaid consolidated P&L skipped: %s", str(e)[:200])
         return result
