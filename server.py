@@ -9298,6 +9298,364 @@ async def email_invoice(
     return {"ok": True, "message_id": (r.json() or {}).get("id")}
 
 
+# =====================================================================
+#  AR / AP AGING REPORTS
+# =====================================================================
+
+
+def _age_bucket(days_overdue: int) -> str:
+    if days_overdue <= 0: return "current"
+    if days_overdue <= 30: return "d1_30"
+    if days_overdue <= 60: return "d31_60"
+    if days_overdue <= 90: return "d61_90"
+    return "d90_plus"
+
+
+async def _aging_report(
+    sb_company_id: str,
+    as_of: str,
+    kind: str,  # "invoice" | "bill"
+) -> dict:
+    """Build an aging report by party (customer or vendor)."""
+    from datetime import date as _d
+    try:
+        as_of_d = _d.fromisoformat(as_of)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid as_of date")
+
+    if kind == "invoice":
+        rows = await _sb_select("invoices", {
+            "company_id": f"eq.{sb_company_id}",
+            "status": "not.in.(paid,void)",
+            "date": f"lte.{as_of}",
+            "select": "id,number,date,due_date,total,balance,customer_id",
+            "order": "date.asc",
+            "limit": "5000",
+        })
+        party_ids = list({r["customer_id"] for r in rows if r.get("customer_id")})
+        party_rows = await _sb_select("customers", {
+            "id": f"in.({','.join(party_ids)})", "select": "id,display_name",
+        }) if party_ids else []
+    else:
+        rows = await _sb_select("bills", {
+            "company_id": f"eq.{sb_company_id}",
+            "status": "not.in.(paid,void)",
+            "date": f"lte.{as_of}",
+            "select": "id,number,date,due_date,total,balance,vendor_id",
+            "order": "date.asc",
+            "limit": "5000",
+        })
+        party_ids = list({r["vendor_id"] for r in rows if r.get("vendor_id")})
+        party_rows = await _sb_select("vendors", {
+            "id": f"in.({','.join(party_ids)})", "select": "id,display_name",
+        }) if party_ids else []
+
+    party_map = {p["id"]: p["display_name"] for p in party_rows}
+
+    # Group by party
+    grouped: dict = {}
+    totals = {"current": 0.0, "d1_30": 0.0, "d31_60": 0.0,
+              "d61_90": 0.0, "d90_plus": 0.0, "total": 0.0}
+
+    for r in rows:
+        balance = float(r.get("balance") or 0)
+        if balance <= 0.005:
+            continue
+        due_str = r.get("due_date") or r.get("date")
+        try:
+            due_d = _d.fromisoformat(due_str)
+            days_overdue = (as_of_d - due_d).days
+        except Exception:
+            days_overdue = 0
+        bucket = _age_bucket(days_overdue)
+        pid = r.get("customer_id" if kind == "invoice" else "vendor_id")
+
+        if pid not in grouped:
+            grouped[pid] = {
+                "party_id": pid,
+                "party_name": party_map.get(pid, "(unknown)"),
+                "current": 0.0, "d1_30": 0.0, "d31_60": 0.0,
+                "d61_90": 0.0, "d90_plus": 0.0, "total": 0.0,
+                "docs": [],
+            }
+        g = grouped[pid]
+        g[bucket] += balance
+        g["total"] += balance
+        g["docs"].append({
+            "id": r["id"], "number": r.get("number"),
+            "date": r["date"], "due_date": r.get("due_date"),
+            "total": float(r.get("total") or 0), "balance": balance,
+            "days_overdue": days_overdue, "bucket": bucket,
+        })
+        totals[bucket] += balance
+        totals["total"] += balance
+
+    parties = sorted(grouped.values(), key=lambda g: g["total"], reverse=True)
+    # Round all
+    for g in parties:
+        for k in ("current", "d1_30", "d31_60", "d61_90", "d90_plus", "total"):
+            g[k] = round(g[k], 2)
+    for k in totals:
+        totals[k] = round(totals[k], 2)
+
+    return {"as_of": as_of, "kind": kind, "parties": parties, "totals": totals}
+
+
+@app.get("/api/reports/ar-aging/{company_id}")
+async def ar_aging(
+    company_id: str,
+    as_of: Optional[str] = None,
+    authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    as_of = as_of or datetime.now().date().isoformat()
+    return await _aging_report(company["supabase_company_id"], as_of, "invoice")
+
+
+@app.get("/api/reports/ap-aging/{company_id}")
+async def ap_aging(
+    company_id: str,
+    as_of: Optional[str] = None,
+    authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(company_id, user)
+    as_of = as_of or datetime.now().date().isoformat()
+    return await _aging_report(company["supabase_company_id"], as_of, "bill")
+
+
+# =====================================================================
+#  TRANSFER DETECTION (intercompany + intracompany)
+# =====================================================================
+
+
+class TransferDetectRequest(BaseModel):
+    date_from: str
+    date_to: str
+    amount_tolerance_pct: Optional[float] = 0.005  # 0.5%
+    date_window_days: Optional[int] = 3
+    same_company_only: Optional[bool] = False
+
+
+@app.post("/api/transfers/detect")
+async def detect_transfers(
+    body: TransferDetectRequest, authorization: str = Header(None),
+):
+    """Scan transactions across the user's accessible manual companies and
+    suggest transfer pairs: an outflow in one account matched by an inflow
+    of equal magnitude in another account within date_window_days.
+
+    Returns suggested pairs — does NOT auto-mark. Use /api/transfers/confirm
+    to commit a pair.
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+
+    # Pull all user-accessible manual companies' supabase ids
+    db = get_db()
+    try:
+        rows = db.execute(
+            """SELECT c.supabase_company_id, c.id as v2_id, c.name
+                 FROM companies c
+                 JOIN user_company_access uca ON uca.company_id = c.id
+                WHERE c.org_id = ? AND uca.user_id = ?
+                  AND c.source = 'manual' AND c.supabase_company_id IS NOT NULL""",
+            (org_id, user["id"]),
+        ).fetchall()
+        companies = [dict(r) for r in rows]
+    finally:
+        db.close()
+    if not companies:
+        return {"pairs": [], "scanned": 0}
+
+    sb_ids = [c["supabase_company_id"] for c in companies]
+    sb_to_v2 = {c["supabase_company_id"]: c for c in companies}
+
+    # Fetch all candidate transactions: non-transfer, no transfer_pair_id,
+    # within date range, across these companies.
+    txs: list = []
+    offset = 0
+    while True:
+        chunk = await _sb_select("transactions", {
+            "company_id": f"in.({','.join(sb_ids)})",
+            "is_transfer": "eq.false",
+            "transfer_pair_id": "is.null",
+            "and": f"(date.gte.{body.date_from},date.lte.{body.date_to})",
+            "select": "id,company_id,account_id,date,amount,merchant_name,description",
+            "order": "id",
+            "limit": "1000",
+            "offset": str(offset),
+        })
+        txs.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
+
+    # Index by magnitude bucket for quick pairing
+    from datetime import date as _d
+    window = body.date_window_days or 3
+    tol = body.amount_tolerance_pct or 0.005
+
+    # Split into inflows (amount < 0 in Plaid convention) and outflows (amount > 0)
+    outflows = [t for t in txs if float(t.get("amount") or 0) > 0.005]
+    inflows  = [t for t in txs if float(t.get("amount") or 0) < -0.005]
+
+    # Build inflow lookup by rounded magnitude to the cent
+    from collections import defaultdict
+    inflow_by_amt = defaultdict(list)
+    for t in inflows:
+        key = round(abs(float(t["amount"])), 2)
+        inflow_by_amt[key].append(t)
+
+    def _parse_d(s):
+        try: return _d.fromisoformat(s[:10])
+        except Exception: return None
+
+    pairs: list = []
+    used_inflow_ids = set()
+    for out in outflows:
+        out_amt = round(abs(float(out["amount"])), 2)
+        out_date = _parse_d(out.get("date"))
+        out_co = out.get("company_id")
+        # Consider exact amount first, then amounts within tolerance
+        candidate_amts = {out_amt}
+        if tol > 0:
+            delta = max(0.01, out_amt * tol)
+            # Check a narrow band of possible inflow amounts
+            for cents in range(max(1, int((out_amt - delta) * 100)),
+                               int((out_amt + delta) * 100) + 1):
+                candidate_amts.add(round(cents / 100, 2))
+        best = None
+        best_score = 0.0
+        for amt in candidate_amts:
+            for inc in inflow_by_amt.get(amt, []):
+                if inc["id"] in used_inflow_ids:
+                    continue
+                inc_co = inc.get("company_id")
+                if body.same_company_only and inc_co != out_co:
+                    continue
+                # At minimum, pair must be a DIFFERENT account (otherwise it's
+                # just posting noise, not a transfer)
+                if inc.get("account_id") == out.get("account_id"):
+                    continue
+                inc_date = _parse_d(inc.get("date"))
+                if not out_date or not inc_date:
+                    continue
+                days_diff = abs((inc_date - out_date).days)
+                if days_diff > window:
+                    continue
+                # Score: exact amount + closeness in date + merchant similarity
+                s = 0.5  # base: amounts match within tolerance
+                s += max(0, 1 - days_diff / max(window, 1)) * 0.3
+                # Name similarity (cheap check)
+                om = (out.get("merchant_name") or out.get("description") or "").lower()
+                im = (inc.get("merchant_name") or inc.get("description") or "").lower()
+                if om and im:
+                    tokens_o = set(om.split())
+                    tokens_i = set(im.split())
+                    overlap = len(tokens_o & tokens_i)
+                    if overlap:
+                        s += min(0.2, overlap * 0.05)
+                # Intercompany = natural transfer, bump score
+                if out_co != inc_co:
+                    s += 0.05
+                if s > best_score:
+                    best_score = s
+                    best = inc
+        if best:
+            used_inflow_ids.add(best["id"])
+            pairs.append({
+                "score": round(best_score, 3),
+                "days_diff": abs((_parse_d(out["date"]) - _parse_d(best["date"])).days),
+                "outflow": {
+                    "id": out["id"],
+                    "date": out["date"],
+                    "amount": float(out["amount"]),
+                    "merchant": out.get("merchant_name") or out.get("description"),
+                    "company_id": out["company_id"],
+                    "company_name": sb_to_v2.get(out["company_id"], {}).get("name"),
+                    "account_id": out.get("account_id"),
+                },
+                "inflow": {
+                    "id": best["id"],
+                    "date": best["date"],
+                    "amount": float(best["amount"]),
+                    "merchant": best.get("merchant_name") or best.get("description"),
+                    "company_id": best["company_id"],
+                    "company_name": sb_to_v2.get(best["company_id"], {}).get("name"),
+                    "account_id": best.get("account_id"),
+                },
+                "is_intercompany": out["company_id"] != best["company_id"],
+            })
+    pairs.sort(key=lambda p: p["score"], reverse=True)
+    return {"pairs": pairs[:500], "scanned": len(txs),
+            "outflows_scanned": len(outflows),
+            "inflows_scanned": len(inflows)}
+
+
+class TransferConfirmBody(BaseModel):
+    outflow_id: str
+    inflow_id: str
+
+
+@app.post("/api/transfers/confirm")
+async def confirm_transfer(
+    body: TransferConfirmBody, authorization: str = Header(None),
+):
+    """Mark both transactions as a transfer pair with a shared transfer_pair_id
+    and is_transfer=true so they drop out of P&L."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+
+    # Validate both transactions belong to user-accessible companies
+    rows = await _sb_select("transactions", {
+        "id": f"in.({body.outflow_id},{body.inflow_id})",
+        "select": "id,company_id", "limit": "2",
+    })
+    if len(rows) != 2:
+        raise HTTPException(status_code=404, detail="Both transactions not found")
+    for r in rows:
+        await _resolve_manual_company_from_supabase_id(r["company_id"], user)
+
+    pair_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    await _sb_update("transactions", {"id": f"in.({body.outflow_id},{body.inflow_id})"}, {
+        "transfer_pair_id": pair_id,
+        "is_transfer": True,
+        "categorized_by": "transfer",
+        "category_id": None,
+        "updated_at": now,
+    })
+    return {"ok": True, "transfer_pair_id": pair_id}
+
+
+@app.post("/api/transfers/unpair")
+async def unpair_transfer(
+    body: TransferConfirmBody, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    rows = await _sb_select("transactions", {
+        "id": f"in.({body.outflow_id},{body.inflow_id})",
+        "select": "id,company_id", "limit": "2",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Transactions not found")
+    for r in rows:
+        await _resolve_manual_company_from_supabase_id(r["company_id"], user)
+    await _sb_update("transactions", {"id": f"in.({body.outflow_id},{body.inflow_id})"}, {
+        "transfer_pair_id": None,
+        "is_transfer": False,
+        "categorized_by": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"ok": True}
+
+
 # ---------- Categories list (for inline pickers) ----------
 
 @app.get("/api/categories/{company_id}")
