@@ -595,51 +595,107 @@ async def _get_valid_token(db, company_id: str) -> tuple:
 
 
 async def _refresh_access_token(db, company_id: str, refresh_token: str) -> str:
-    """Refresh an expired access token and store the new tokens."""
+    """Refresh an expired access token and store the new tokens.
+
+    Only marks the company as `auth_expired` on REAL authentication failures
+    (QBO's `invalid_grant` / `invalid_client` responses). Transient issues
+    (429 rate limit, 5xx server errors, network errors) are retried with
+    exponential backoff and — critically — do NOT flip status, so heavy
+    workloads like a multi-month GL import don't accidentally disconnect
+    the company.
+    """
+    import asyncio
+
     auth_header = base64.b64encode(
         f"{QBO_CLIENT_ID}:{QBO_CLIENT_SECRET}".encode()
     ).decode()
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            QBO_TOKEN_URL,
-            data={"grant_type": "refresh_token", "refresh_token": refresh_token},
-            headers={
-                "Authorization": f"Basic {auth_header}",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-            },
+    _AUTH_FATAL_ERRORS = {
+        "invalid_grant",       # refresh token revoked or expired past 100 days
+        "invalid_client",      # client id/secret wrong
+        "unauthorized_client", # app not allowed
+    }
+
+    last_err = None
+    for attempt in range(4):  # 0..3 → up to 4 tries total
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    QBO_TOKEN_URL,
+                    data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+                    headers={
+                        "Authorization": f"Basic {auth_header}",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Accept": "application/json",
+                    },
+                )
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            last_err = f"Network error: {e!s}"
+            logger.warning("Token refresh transient network error (attempt %d): %s",
+                           attempt + 1, last_err)
+            await asyncio.sleep(2 ** attempt)
+            continue
+
+        intuit_tid = resp.headers.get("intuit_tid", "N/A")
+
+        if resp.status_code == 200:
+            tokens = resp.json()
+            new_access = tokens["access_token"]
+            new_refresh = tokens.get("refresh_token", refresh_token)
+            expires_in = tokens.get("expires_in", 3600)
+            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+            logger.info(
+                "Token refresh OK | company=%s | intuit_tid=%s | attempt=%d",
+                company_id, intuit_tid, attempt + 1,
+            )
+            db.execute(
+                """UPDATE companies SET access_token=?, refresh_token=?, token_expires_at=?,
+                   status='connected' WHERE id=?""",
+                (new_access, new_refresh, expires_at, company_id),
+            )
+            db.commit()
+            return new_access
+
+        body_text = resp.text or ""
+        # Inspect QBO error payload to classify
+        err_code = ""
+        try:
+            err_code = (resp.json() or {}).get("error") or ""
+        except Exception:
+            pass
+
+        # Real auth failure — refresh token is dead. Mark expired and bail.
+        if err_code in _AUTH_FATAL_ERRORS or (resp.status_code == 400 and err_code):
+            db.execute(
+                "UPDATE companies SET status='auth_expired' WHERE id=?",
+                (company_id,),
+            )
+            db.commit()
+            logger.error(
+                "Token refresh FATAL | company=%s | status=%d | err=%s | intuit_tid=%s | body=%s",
+                company_id, resp.status_code, err_code, intuit_tid, body_text[:300],
+            )
+            raise HTTPException(
+                status_code=401,
+                detail=f"QuickBooks session expired. Please re-connect this company. ({err_code or resp.status_code})",
+            )
+
+        # Transient — 429 rate limit, 5xx, or unexpected 4xx without a fatal code
+        last_err = f"HTTP {resp.status_code}: {body_text[:200]}"
+        retry_after = int(resp.headers.get("Retry-After", "0") or 0)
+        backoff = retry_after if retry_after > 0 else (2 ** attempt)
+        logger.warning(
+            "Token refresh TRANSIENT | company=%s | status=%d | intuit_tid=%s | attempt=%d | backoff=%ds | body=%s",
+            company_id, resp.status_code, intuit_tid, attempt + 1, backoff, body_text[:200],
         )
+        await asyncio.sleep(backoff)
 
-    intuit_tid = resp.headers.get("intuit_tid", "N/A")
-
-    if resp.status_code != 200:
-        # Mark company as needing re-auth
-        db.execute("UPDATE companies SET status='auth_expired' WHERE id=?", (company_id,))
-        db.commit()
-        logger.error(
-            "Token refresh FAILED | company=%s | status=%d | intuit_tid=%s | body=%s",
-            company_id, resp.status_code, intuit_tid, resp.text[:300],
-        )
-        raise HTTPException(
-            status_code=401,
-            detail=f"Token refresh failed. Please re-authorize this company. QBO response: {resp.text[:200]}"
-        )
-
-    tokens = resp.json()
-    new_access = tokens["access_token"]
-    new_refresh = tokens.get("refresh_token", refresh_token)
-    expires_in = tokens.get("expires_in", 3600)
-    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
-    logger.info("Token refresh OK | company=%s | intuit_tid=%s", company_id, intuit_tid)
-
-    db.execute(
-        """UPDATE companies SET access_token=?, refresh_token=?, token_expires_at=?,
-           status='connected' WHERE id=?""",
-        (new_access, new_refresh, expires_at, company_id),
+    # Exhausted retries on transient errors — do NOT flip status; bubble a 503
+    logger.error("Token refresh exhausted retries | company=%s | last=%s", company_id, last_err)
+    raise HTTPException(
+        status_code=503,
+        detail=f"QuickBooks is temporarily unreachable. Try again in a minute. ({last_err})",
     )
-    db.commit()
-    return new_access
 
 
 async def qbo_api_call(db, company_id: str, endpoint: str,
@@ -6744,72 +6800,121 @@ async def _sum_plaid_by_coa_type(
     return result
 
 
+# ---------- QBO-shape helpers (so the existing front-end renderer works) ----------
+
+def _qbo_section(group_name: str, header_label: str, total_label: str,
+                 line_rows: list, total_value: float, columns: int = 2) -> dict:
+    """Build a QBO-style Section row. line_rows = [{name, total}]."""
+    return {
+        "type": "Section",
+        "group": group_name,
+        "Header": {"ColData": [{"value": header_label}]
+                                + [{"value": ""}] * (columns - 1)},
+        "Rows": {"Row": [
+            {"ColData": [{"value": r["name"]}, {"value": f"{r['total']:.2f}"}]}
+            for r in line_rows
+        ]},
+        "Summary": {"ColData": [
+            {"value": total_label}, {"value": f"{total_value:.2f}"},
+        ]},
+    }
+
+
+def _qbo_summary_row(group_name: str, label: str, total: float, columns: int = 2) -> dict:
+    return {
+        "type": "Section",
+        "group": group_name,
+        "Summary": {"ColData": [
+            {"value": label}, {"value": f"{total:.2f}"},
+        ]},
+    }
+
+
 async def _plaid_pl(sb_company_id: str, start_date: str, end_date: str) -> dict:
-    """Return a P&L-shaped dict for a manual company."""
+    """Return a QBO-shaped P&L dict for a manual company."""
     buckets = await _sum_plaid_by_coa_type(sb_company_id, start_date, end_date)
-    income_rows = sorted(buckets["income"], key=lambda r: r["code"])
-    expense_rows = sorted(buckets["expense"], key=lambda r: r["code"])
-    total_income = sum(r["total"] for r in income_rows)
-    total_expense = sum(r["total"] for r in expense_rows) + buckets["uncategorized_expense_total"]
+    income_rows = [{"name": r["name"], "total": r["total"]}
+                   for r in sorted(buckets["income"], key=lambda r: r["code"])]
+    expense_rows = [{"name": r["name"], "total": r["total"]}
+                    for r in sorted(buckets["expense"], key=lambda r: r["code"])]
     if buckets["uncategorized_expense_total"]:
-        expense_rows.append({
-            "coa_id": None, "code": "9000", "name": "Uncategorized",
-            "total": buckets["uncategorized_expense_total"],
-        })
+        expense_rows.append({"name": "Uncategorized",
+                             "total": buckets["uncategorized_expense_total"]})
+
+    total_income = sum(r["total"] for r in income_rows)
+    total_expense = sum(r["total"] for r in expense_rows)
+    net_income = total_income - total_expense
+
+    label = end_date or ""
     return {
         "Header": {"StartPeriod": start_date, "EndPeriod": end_date,
-                   "ReportName": "ProfitAndLoss", "Source": "plaid"},
-        "Rows": {
-            "income": income_rows,
-            "expense": expense_rows,
-            "totals": {
-                "income": round(total_income, 2),
-                "expense": round(total_expense, 2),
-                "net_income": round(total_income - total_expense, 2),
-            },
-        },
+                   "ReportName": "ProfitAndLoss", "Source": "plaid",
+                   "Currency": "USD"},
+        "Columns": {"Column": [
+            {"ColTitle": "", "ColType": "Account"},
+            {"ColTitle": label, "ColType": "Money"},
+        ]},
+        "Rows": {"Row": [
+            _qbo_section("Income", "Income", "Total Income", income_rows, total_income),
+            _qbo_section("Expenses", "Expenses", "Total Expenses", expense_rows, total_expense),
+            _qbo_summary_row("NetIncome", "Net Income", net_income),
+        ]},
     }
 
 
 async def _plaid_balance_sheet(sb_company_id: str, as_of: str) -> dict:
-    """Bank-account balances + aggregated historical balances by CoA type."""
+    """QBO-shaped Balance Sheet from Plaid bank balances + retained earnings."""
     accounts = await _sb_select("accounts", {
         "company_id": f"eq.{sb_company_id}",
         "select": "id,name,type,subtype,current_balance,available_balance,currency",
     })
-    total_cash = sum(float(a.get("current_balance") or 0) for a in accounts
-                     if (a.get("type") or "").lower() in ("depository", "investment"))
-    total_liabilities = sum(float(a.get("current_balance") or 0) for a in accounts
-                            if (a.get("type") or "").lower() in ("credit", "loan"))
+    asset_rows = [
+        {"name": a["name"], "total": float(a.get("current_balance") or 0)}
+        for a in accounts if (a.get("type") or "").lower() in ("depository", "investment")
+    ]
+    liability_rows = [
+        # Credit card balances are typically reported negative by Plaid; flip for BS.
+        {"name": a["name"], "total": abs(float(a.get("current_balance") or 0))}
+        for a in accounts if (a.get("type") or "").lower() in ("credit", "loan")
+    ]
 
-    # Historical CoA balances from journal-style aggregation: income - expense per period feeds retained earnings
-    # For a first cut: just show account balances + retained earnings from all-time P&L up to as_of.
+    total_assets = sum(r["total"] for r in asset_rows)
+    total_liabilities = sum(r["total"] for r in liability_rows)
+
     pl = await _plaid_pl(sb_company_id, "1900-01-01", as_of)
-    retained = pl["Rows"]["totals"]["net_income"]
+    # Pull net income from the synthesized P&L — find the NetIncome row
+    retained = 0.0
+    for r in pl.get("Rows", {}).get("Row", []):
+        if r.get("group") == "NetIncome":
+            try:
+                retained = float(r["Summary"]["ColData"][1]["value"])
+            except Exception:
+                retained = 0.0
+            break
+    equity_rows = [{"name": "Retained Earnings", "total": round(retained, 2)}]
+    total_equity = sum(r["total"] for r in equity_rows)
 
     return {
-        "Header": {"AsOf": as_of, "ReportName": "BalanceSheet", "Source": "plaid"},
-        "Rows": {
-            "assets": [
-                {"name": a["name"], "total": float(a.get("current_balance") or 0)}
-                for a in accounts if (a.get("type") or "").lower() in ("depository", "investment")
-            ],
-            "liabilities": [
-                {"name": a["name"], "total": float(a.get("current_balance") or 0)}
-                for a in accounts if (a.get("type") or "").lower() in ("credit", "loan")
-            ],
-            "equity": [{"name": "Retained Earnings", "total": round(retained, 2)}],
-            "totals": {
-                "assets": round(total_cash, 2),
-                "liabilities": round(total_liabilities, 2),
-                "equity": round(retained, 2),
-            },
-        },
+        "Header": {"EndPeriod": as_of, "ReportName": "BalanceSheet",
+                   "Source": "plaid", "Currency": "USD"},
+        "Columns": {"Column": [
+            {"ColTitle": "", "ColType": "Account"},
+            {"ColTitle": as_of, "ColType": "Money"},
+        ]},
+        "Rows": {"Row": [
+            _qbo_section("Assets", "Assets", "Total Assets", asset_rows, total_assets),
+            _qbo_section("Liabilities", "Liabilities", "Total Liabilities",
+                         liability_rows, total_liabilities),
+            _qbo_section("Equity", "Equity", "Total Equity", equity_rows, total_equity),
+            _qbo_summary_row("LiabilitiesAndEquity",
+                             "Total Liabilities and Equity",
+                             total_liabilities + total_equity),
+        ]},
     }
 
 
 async def _plaid_cash_flow(sb_company_id: str, start_date: str, end_date: str) -> dict:
-    """Cash in vs cash out by month for the given period."""
+    """QBO-shaped Cash Flow: monthly inflow/outflow rolled into a single net column."""
     txs = await _sb_select("transactions", {
         "company_id": f"eq.{sb_company_id}",
         "is_transfer": "eq.false",
@@ -6828,25 +6933,30 @@ async def _plaid_cash_flow(sb_company_id: str, start_date: str, end_date: str) -
         m = by_month.setdefault(d, {"inflow": 0.0, "outflow": 0.0})
         m["inflow"] += inflow
         m["outflow"] += outflow
-    months = [
-        {"month": k, "inflow": round(v["inflow"], 2),
-         "outflow": round(v["outflow"], 2),
-         "net": round(v["inflow"] - v["outflow"], 2)}
-        for k, v in sorted(by_month.items())
-    ]
-    total_in = sum(m["inflow"] for m in months)
-    total_out = sum(m["outflow"] for m in months)
+
+    inflow_rows = [{"name": k, "total": round(v["inflow"], 2)}
+                   for k, v in sorted(by_month.items())]
+    outflow_rows = [{"name": k, "total": round(v["outflow"], 2)}
+                    for k, v in sorted(by_month.items())]
+    total_in = sum(r["total"] for r in inflow_rows)
+    total_out = sum(r["total"] for r in outflow_rows)
+
     return {
         "Header": {"StartPeriod": start_date, "EndPeriod": end_date,
-                   "ReportName": "CashFlow", "Source": "plaid"},
-        "Rows": {
-            "months": months,
-            "totals": {
-                "inflow": round(total_in, 2),
-                "outflow": round(total_out, 2),
-                "net": round(total_in - total_out, 2),
-            },
-        },
+                   "ReportName": "CashFlow", "Source": "plaid",
+                   "Currency": "USD"},
+        "Columns": {"Column": [
+            {"ColTitle": "", "ColType": "Account"},
+            {"ColTitle": f"{start_date} → {end_date}", "ColType": "Money"},
+        ]},
+        "Rows": {"Row": [
+            _qbo_section("CashInflow", "Cash Inflow (by month)",
+                         "Total Inflow", inflow_rows, total_in),
+            _qbo_section("CashOutflow", "Cash Outflow (by month)",
+                         "Total Outflow", outflow_rows, total_out),
+            _qbo_summary_row("NetCashIncrease", "Net Cash Increase for Period",
+                             total_in - total_out),
+        ]},
     }
 
 
@@ -7596,18 +7706,36 @@ async def get_company_dashboard(company_id: str, authorization: str = Header(Non
     cash_on_hand = sum(float(a.get("current_balance") or 0) for a in accounts
                        if (a.get("type") or "").lower() in ("depository",))
 
-    # YTD P&L
-    ytd_pl = await _plaid_pl(sb_company_id, year_start, today.isoformat())
-    ytd_revenue = ytd_pl["Rows"]["totals"]["income"]
-    ytd_expense = ytd_pl["Rows"]["totals"]["expense"]
-    ytd_net     = ytd_pl["Rows"]["totals"]["net_income"]
+    # YTD P&L — use the raw bucket sums directly (skip the QBO-shape wrapper for speed)
+    ytd_buckets = await _sum_plaid_by_coa_type(sb_company_id, year_start, today.isoformat())
+    ytd_revenue = sum(r["total"] for r in ytd_buckets["income"])
+    ytd_expense = sum(r["total"] for r in ytd_buckets["expense"]) + ytd_buckets["uncategorized_expense_total"]
+    ytd_net     = ytd_revenue - ytd_expense
 
-    # 12-month trend: monthly net income
-    trend_cf = await _plaid_cash_flow(sb_company_id, twelve_months_ago, today.isoformat())
-    months = trend_cf["Rows"]["months"]
+    # 12-month trend: monthly net (from raw cash flow aggregation)
+    trend_txs = await _sb_select("transactions", {
+        "company_id": f"eq.{sb_company_id}",
+        "is_transfer": "eq.false",
+        "and": f"(date.gte.{twelve_months_ago},date.lte.{today.isoformat()})",
+        "select": "date,amount", "limit": "50000",
+    })
+    by_month: dict = {}
+    for t in trend_txs:
+        d = (t.get("date") or "")[:7]
+        if not d: continue
+        amt = float(t.get("amount") or 0)
+        m = by_month.setdefault(d, {"inflow": 0.0, "outflow": 0.0})
+        m["inflow"] += max(0.0, -amt)
+        m["outflow"] += max(0.0, amt)
+    months = [
+        {"month": k, "inflow": round(v["inflow"], 2),
+         "outflow": round(v["outflow"], 2),
+         "net": round(v["inflow"] - v["outflow"], 2)}
+        for k, v in sorted(by_month.items())
+    ]
 
     # Top 5 expense categories from YTD
-    top_expenses = sorted(ytd_pl["Rows"]["expense"], key=lambda r: r.get("total", 0), reverse=True)[:5]
+    top_expenses = sorted(ytd_buckets["expense"], key=lambda r: r.get("total", 0), reverse=True)[:5]
 
     # Uncategorized count
     uncats = await _sb_select("transactions", {
@@ -7956,10 +8084,15 @@ async def import_qbo_to_manual(body: QboImportRequest, authorization: str = Head
     )
 
     # 5) For each month chunk, pull GL and upsert
+    import asyncio as _asyncio
     totals = {"imported": 0, "skipped": 0, "months_processed": 0}
     db = get_db()
     try:
-        for (m_start, m_end) in months:
+        for idx_m, (m_start, m_end) in enumerate(months):
+            # Small delay between months to stay under QBO's rate limit
+            # (~500 req/min per realm). This is well below even with retries.
+            if idx_m > 0:
+                await _asyncio.sleep(0.4)
             try:
                 report = await qbo_get_report(db, src_dict["id"], "GeneralLedger", {
                     "start_date": m_start,
@@ -7968,6 +8101,10 @@ async def import_qbo_to_manual(body: QboImportRequest, authorization: str = Head
                     "columns": "tx_date,txn_type,doc_num,name,memo,account_name,debt_amt,credit_amt",
                 })
             except HTTPException as e:
+                # Non-fatal — log and move on. Status_code 401 means token
+                # genuinely expired; 503 is transient. In both cases we don't
+                # abort the whole import, since already-imported months are
+                # persisted and the idempotent plaid_txn_id lets the user retry.
                 logger.warning("QBO GL fetch failed for %s..%s: %s", m_start, m_end, e.detail)
                 continue
             except Exception as e:
