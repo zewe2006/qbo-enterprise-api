@@ -2647,6 +2647,34 @@ async def get_balance_sheet(params: ReportParams, authorization: str = Header(No
             if plaid_reports:
                 result = dict(result or {})
                 result["plaid_reports"] = plaid_reports
+
+                # Merge Plaid BS into consolidated `current` so the main
+                # table sums QBO + manual companies together.
+                base_cur = result.get("current")
+                to_merge = [p["report"] for p in plaid_reports if p.get("report")]
+                if base_cur:
+                    to_merge.insert(0, base_cur)
+                merged = _merge_reports(to_merge) if to_merge else None
+                if merged:
+                    result["current"] = merged
+
+                # Extend companies list so the By Company header shows
+                # the Plaid names.
+                existing = {c.get("company_id") for c in (result.get("companies") or [])}
+                for p in plaid_reports:
+                    if p.get("company_id") and p["company_id"] not in existing:
+                        result.setdefault("companies", []).append(
+                            {"name": p.get("name"), "company_id": p["company_id"]}
+                        )
+
+                # By Company view: include Plaid companies in the per-company
+                # breakdown so they render alongside QBO columns.
+                if params.by_company:
+                    cbs = result.setdefault("company_breakdowns", {})
+                    for p in plaid_reports:
+                        rpt = p.get("report")
+                        if rpt and p.get("name"):
+                            cbs[p["name"]] = _build_flat_lookup(rpt)
         except Exception as e:
             logger.info("Plaid consolidated BS skipped: %s", str(e)[:200])
         return result
