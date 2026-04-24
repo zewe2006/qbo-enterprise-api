@@ -6065,6 +6065,8 @@ async def _plaid_sync_transactions(sb_item: dict) -> dict:
                 if action.get("set_category_id"):
                     base_row["category_id"] = action["set_category_id"]
                     base_row["categorized_by"] = "rule"
+                if action.get("set_vendor_id"):
+                    base_row["vendor_id"] = action["set_vendor_id"]
                 if action.get("mark_transfer"):
                     base_row["is_transfer"] = True
                 if action.get("set_notes"):
@@ -7168,7 +7170,7 @@ async def list_transactions(
     params: dict = {
         "company_id": f"eq.{sb_company_id}",
         "select": "id,date,posted_date,amount,merchant_name,description,pending,plaid_pfc,"
-                   "is_transfer,category_id,notes,account_id,categorized_by,split_parent_id",
+                   "is_transfer,category_id,vendor_id,notes,account_id,categorized_by,split_parent_id",
         "limit": str(limit),
         "offset": str(offset),
         "order": sort,
@@ -7212,11 +7214,13 @@ async def list_transactions(
 
     txs = await _sb_select("transactions", params)
 
-    # Hydrate account + category names (single pass for each set)
+    # Hydrate account + category + vendor names
     account_ids = list({t["account_id"] for t in txs if t.get("account_id")})
     category_ids = list({t["category_id"] for t in txs if t.get("category_id")})
+    vendor_ids = list({t["vendor_id"] for t in txs if t.get("vendor_id")})
     accounts_map: dict = {}
     categories_map: dict = {}
+    vendors_map: dict = {}
     if account_ids:
         accs = await _sb_select("accounts", {
             "id": f"in.({','.join(account_ids)})", "select": "id,name,mask,type,subtype",
@@ -7227,19 +7231,27 @@ async def list_transactions(
             "id": f"in.({','.join(category_ids)})", "select": "id,name,coa_account_id",
         })
         categories_map = {c["id"]: c for c in cats}
+    if vendor_ids:
+        vs = await _sb_select("vendors", {
+            "id": f"in.({','.join(vendor_ids)})", "select": "id,display_name",
+        })
+        vendors_map = {v["id"]: v for v in vs}
 
     for t in txs:
         t["account"] = accounts_map.get(t.get("account_id"))
         t["category"] = categories_map.get(t.get("category_id"))
+        t["vendor"] = vendors_map.get(t.get("vendor_id"))
     return {"transactions": txs, "count": len(txs),
             "has_more": len(txs) >= limit}
 
 
 class TransactionPatch(BaseModel):
     category_id: Optional[str] = None
+    vendor_id: Optional[str] = None
     is_transfer: Optional[bool] = None
     notes: Optional[str] = None
     clear_category: Optional[bool] = False  # if True, set category_id = null
+    clear_vendor: Optional[bool] = False
 
 
 @app.patch("/api/transactions/{txn_id}")
@@ -7265,9 +7277,12 @@ async def patch_transaction(
     elif body.category_id is not None:
         patch["category_id"] = body.category_id
         patch["categorized_by"] = "user"
+    if body.clear_vendor:
+        patch["vendor_id"] = None
+    elif body.vendor_id is not None:
+        patch["vendor_id"] = body.vendor_id
     if body.is_transfer is not None:
         patch["is_transfer"] = body.is_transfer
-        # When marking a transfer, clear category (transfers aren't P&L rows)
         if body.is_transfer:
             patch["category_id"] = None
     if body.notes is not None:
@@ -7635,6 +7650,8 @@ async def recategorize_all(company_id: str, authorization: str = Header(None)):
                 patch["category_id"] = action["set_category_id"]
                 patch["categorized_by"] = "rule"
                 counts["rule"] += 1
+            if action.get("set_vendor_id"):
+                patch["vendor_id"] = action["set_vendor_id"]
             if action.get("mark_transfer"):
                 patch["is_transfer"] = True
             if action.get("set_notes"):
