@@ -8343,43 +8343,60 @@ async def delete_rule(rule_id: str, authorization: str = Header(None)):
 class RulePreviewBody(BaseModel):
     company_id: str
     match: dict
+    scope: Optional[str] = "uncategorized"   # uncategorized | plaid_only | non_user | all
 
 
 @app.post("/api/rules/preview")
 async def preview_rule(body: RulePreviewBody, authorization: str = Header(None)):
-    """Count how many uncategorized transactions this rule would match."""
+    """Count how many transactions this rule would match within `scope`.
+    Defaults to `uncategorized` (rows with no category yet). Use
+    `plaid_only` after saving a rule to show "N Plaid-auto-categorized
+    rows match — apply the rule to them?"
+    """
     token = _extract_token(authorization)
     user = get_current_user(token)
     company = _get_manual_company_for_user(body.company_id, user)
+    sb = company["supabase_company_id"]
+    scope = body.scope or "uncategorized"
 
-    # Pull uncategorized txns and evaluate in Python against the match dict
-    txs = await _sb_select("transactions", {
-        "company_id": f"eq.{company['supabase_company_id']}",
-        "category_id": "is.null",
+    params = {
+        "company_id": f"eq.{sb}",
         "is_transfer": "eq.false",
-        "select": "id,merchant_name,description,amount,account_id",
+        "select": "id,merchant_name,description,amount,account_id,categorized_by",
         "limit": "5000",
-    })
+    }
+    if scope == "uncategorized":
+        params["category_id"] = "is.null"
+    elif scope == "plaid_only":
+        params["categorized_by"] = "eq.plaid"
+    elif scope == "non_user":
+        # Plaid, QBO-imported, or null. Anything except user/rule.
+        params["or"] = "(categorized_by.is.null,categorized_by.eq.plaid,categorized_by.eq.qbo_import)"
+    elif scope == "all":
+        params["or"] = "(categorized_by.is.null,categorized_by.neq.user)"
+
+    txs = await _sb_select("transactions", params)
     matches = 0
     for t in txs:
         if _apply_rule_to_tx(t, {"match": body.match}):
             matches += 1
-    return {"matches": matches, "scanned": len(txs)}
+    return {"matches": matches, "scanned": len(txs), "scope": scope}
 
 
 @app.post("/api/rules/{company_id}/recategorize")
 async def recategorize_all(
     company_id: str,
-    scope: str = "uncategorized",  # uncategorized | non_user | all
+    scope: str = "uncategorized",  # uncategorized | plaid_only | non_user | all
     authorization: str = Header(None),
 ):
     """Re-run rules + PFC fallback across transactions.
     scope:
       - uncategorized (default): only rows with category_id IS NULL
+      - plaid_only: only rows where categorized_by='plaid'. Use this
+        after saving a new rule to override just Plaid's auto-guesses
+        without disturbing QBO-imported or user-set rows.
       - non_user: also re-run against 'plaid' / 'qbo_import' / null rows,
-        but never touches categorized_by='user' or 'rule' rows. Use this
-        after creating a new rule to have it override existing Plaid PFC
-        auto-categorization.
+        but never touches categorized_by='user' or 'rule' rows.
       - all: also includes existing 'rule' rows (in case rules changed).
         Still preserves 'user'-categorized rows.
     """
@@ -8405,9 +8422,10 @@ async def recategorize_all(
         "order": "id",
         "limit": "1000",
     }
-    if scope == "non_user":
-        base["categorized_by"] = "in.(plaid,qbo_import,null)"
-        base["or"] = "(categorized_by.is.null,categorized_by.neq.user)"
+    if scope == "plaid_only":
+        base["categorized_by"] = "eq.plaid"
+    elif scope == "non_user":
+        base["or"] = "(categorized_by.is.null,categorized_by.eq.plaid,categorized_by.eq.qbo_import)"
     elif scope == "all":
         base["or"] = "(categorized_by.is.null,categorized_by.neq.user)"
     else:
