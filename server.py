@@ -10401,7 +10401,9 @@ async def detect_transfers(
     # Index by magnitude bucket for quick pairing
     from datetime import date as _d
     window = body.date_window_days or 3
-    tol = body.amount_tolerance_pct or 0.005
+    # Exact-match only — no tolerance. A transfer between bank accounts is
+    # the same dollars moving, so out-amount and in-amount match to the cent.
+    tol = 0.0
 
     # Split into inflows (amount < 0 in Plaid convention) and outflows (amount > 0)
     outflows = [t for t in txs if float(t.get("amount") or 0) > 0.005]
@@ -10424,14 +10426,6 @@ async def detect_transfers(
         out_amt = round(abs(float(out["amount"])), 2)
         out_date = _parse_d(out.get("date"))
         out_co = out.get("company_id")
-        # Consider exact amount first, then amounts within tolerance
-        candidate_amts = {out_amt}
-        if tol > 0:
-            delta = max(0.01, out_amt * tol)
-            # Check a narrow band of possible inflow amounts
-            for cents in range(max(1, int((out_amt - delta) * 100)),
-                               int((out_amt + delta) * 100) + 1):
-                candidate_amts.add(round(cents / 100, 2))
         best = None
         best_score = 0.0
         om = (out.get("merchant_name") or out.get("description") or "").lower()
@@ -10439,7 +10433,8 @@ async def detect_transfers(
                        "book tran", "internal tran", "a2a", "from account", "to account",
                        "from checking", "to checking", "from savings", "to savings")
         out_looks_transfer = any(k in om for k in transfer_kw)
-        for amt in candidate_amts:
+        # Exact amount only — no tolerance.
+        for amt in (out_amt,):
             for inc in inflow_by_amt.get(amt, []):
                 if inc["id"] in used_inflow_ids:
                     continue
@@ -10517,7 +10512,7 @@ async def detect_transfers(
             })
     # Drop low-confidence suggestions — otherwise the user gets flooded with
     # coincidentally-equal amounts that aren't transfers at all.
-    pairs = [p for p in pairs if p["score"] >= 0.6]
+    pairs = [p for p in pairs if p["score"] >= 0.7]
     pairs.sort(key=lambda p: p["score"], reverse=True)
     return {"pairs": pairs[:500], "scanned": len(txs),
             "outflows_scanned": len(outflows),
