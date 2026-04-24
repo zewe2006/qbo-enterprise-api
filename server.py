@@ -2379,6 +2379,20 @@ async def _manual_company_by_id(company_id: str, org_id: str) -> Optional[dict]:
 
 
 def _plaid_period(params) -> tuple:
+    # Explicit dates win
+    if params.start_date and params.end_date:
+        return params.start_date, params.end_date
+    # Resolve date_macro (e.g. "Last Month", "This Fiscal Quarter")
+    if getattr(params, "date_macro", None):
+        try:
+            s, e = _resolve_date_macro(
+                params.date_macro, params.start_date, params.end_date,
+            )
+            if s and e:
+                return s, e
+        except Exception:
+            pass
+    # Final fallback: wide-open
     start = params.start_date or "1900-01-01"
     end = params.end_date or datetime.now().strftime("%Y-%m-%d")
     return start, end
