@@ -8926,6 +8926,18 @@ async def apply_match(body: MatchApplyBody, authorization: str = Header(None)):
 
 
 # ---------- Credit Memos (M5) ----------
+# LineBody is used by invoice/bill/credit-memo bodies. Defined here (before
+# CreditMemoBody) because the M3/M4/M5 block was inserted above the M1/M2
+# definitions. The later M1/M2 redefinition is harmless (same class shape).
+
+
+class LineBody(BaseModel):
+    description: Optional[str] = None
+    quantity: float = 1
+    unit_price: float = 0
+    tax_rate: float = 0  # as decimal, e.g. 0.0825 = 8.25%
+    coa_account_id: Optional[str] = None
+
 
 class CreditMemoBody(BaseModel):
     customer_id: str
