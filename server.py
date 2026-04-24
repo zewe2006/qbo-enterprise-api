@@ -2820,11 +2820,17 @@ async def get_transaction_detail(params: TransactionDetailParams, authorization:
         return {"transactions": [], "message": "Select a company"}
 
     all_transactions = []
-    # Effective date range for manual-company queries. Also used if a QBO
-    # company drill-down wants to fall back cleanly.
-    eff_start, eff_end = _resolve_date_macro(
-        params.date_macro, params.start_date, params.end_date,
-    )
+    # Effective date range for manual-company queries. When the caller
+    # didn't specify anything (no macro, no explicit dates), leave wide-open
+    # — the helper treats empty strings as 1900 → today. Only resolve the
+    # macro when one was actually passed, otherwise _resolve_date_macro
+    # silently defaults to the current month.
+    if params.date_macro or (params.start_date and params.end_date):
+        eff_start, eff_end = _resolve_date_macro(
+            params.date_macro, params.start_date, params.end_date,
+        )
+    else:
+        eff_start, eff_end = "", ""
 
     for company in companies:
         try:
