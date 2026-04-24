@@ -6773,13 +6773,24 @@ async def _sum_plaid_by_coa_type(
     sb_company_id: str, start_date: str, end_date: str,
 ) -> dict:
     """Return {'income':[{coa_id,name,code,total}], 'expense':[...], 'asset':..., 'liability':..., 'equity':...}."""
-    txs = await _sb_select("transactions", {
-        "company_id": f"eq.{sb_company_id}",
-        "is_transfer": "eq.false",
-        "and": f"(date.gte.{start_date},date.lte.{end_date})",
-        "select": "amount,category_id",
-        "limit": "50000",
-    })
+    # Supabase/PostgREST caps a single response at 1000 rows regardless of the
+    # `limit` we send, so page through the full result set explicitly.
+    txs: list = []
+    offset = 0
+    while True:
+        chunk = await _sb_select("transactions", {
+            "company_id": f"eq.{sb_company_id}",
+            "is_transfer": "eq.false",
+            "and": f"(date.gte.{start_date},date.lte.{end_date})",
+            "select": "amount,category_id",
+            "order": "id",
+            "limit": "1000",
+            "offset": str(offset),
+        })
+        txs.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
     cat_ids = list({t["category_id"] for t in txs if t.get("category_id")})
     cat_to_coa = {}
     if cat_ids:
@@ -7050,13 +7061,22 @@ async def _plaid_balance_sheet(sb_company_id: str, as_of: str) -> dict:
 
 async def _plaid_cash_flow(sb_company_id: str, start_date: str, end_date: str) -> dict:
     """QBO-shaped Cash Flow: monthly inflow/outflow rolled into a single net column."""
-    txs = await _sb_select("transactions", {
-        "company_id": f"eq.{sb_company_id}",
-        "is_transfer": "eq.false",
-        "and": f"(date.gte.{start_date},date.lte.{end_date})",
-        "select": "date,amount",
-        "limit": "50000",
-    })
+    txs: list = []
+    offset = 0
+    while True:
+        chunk = await _sb_select("transactions", {
+            "company_id": f"eq.{sb_company_id}",
+            "is_transfer": "eq.false",
+            "and": f"(date.gte.{start_date},date.lte.{end_date})",
+            "select": "date,amount",
+            "order": "id",
+            "limit": "1000",
+            "offset": str(offset),
+        })
+        txs.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
     by_month: dict = {}
     for t in txs:
         d = (t.get("date") or "")[:7]  # YYYY-MM
@@ -7396,14 +7416,23 @@ async def _coa_ytd_totals(sb_company_id: str) -> dict:
     """Return dict coa_account_id -> ytd total amount. Positive = outflow (expense);
     for income rows the frontend flips sign."""
     year_start = f"{datetime.now().year}-01-01"
-    # Aggregate transactions by category → CoA
-    txs = await _sb_select("transactions", {
-        "company_id": f"eq.{sb_company_id}",
-        "is_transfer": "eq.false",
-        "date": f"gte.{year_start}",
-        "select": "amount,category_id",
-        "limit": "50000",
-    })
+    # Aggregate transactions by category → CoA (paginate — Supabase caps at 1000/req)
+    txs: list = []
+    offset = 0
+    while True:
+        chunk = await _sb_select("transactions", {
+            "company_id": f"eq.{sb_company_id}",
+            "is_transfer": "eq.false",
+            "date": f"gte.{year_start}",
+            "select": "amount,category_id",
+            "order": "id",
+            "limit": "1000",
+            "offset": str(offset),
+        })
+        txs.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
     cat_ids = list({t["category_id"] for t in txs if t.get("category_id")})
     cat_to_coa: dict = {}
     if cat_ids:
@@ -7635,12 +7664,21 @@ async def recategorize_all(company_id: str, authorization: str = Header(None)):
     })
     category_by_name = {c["name"].lower(): c["id"] for c in categories if c.get("name")}
 
-    txs = await _sb_select("transactions", {
-        "company_id": f"eq.{sb_company_id}",
-        "category_id": "is.null", "is_transfer": "eq.false",
-        "select": "id,merchant_name,description,amount,account_id,plaid_pfc",
-        "limit": "50000",
-    })
+    txs: list = []
+    offset = 0
+    while True:
+        chunk = await _sb_select("transactions", {
+            "company_id": f"eq.{sb_company_id}",
+            "category_id": "is.null", "is_transfer": "eq.false",
+            "select": "id,merchant_name,description,amount,account_id,plaid_pfc",
+            "order": "id",
+            "limit": "1000",
+            "offset": str(offset),
+        })
+        txs.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
     counts = {"rule": 0, "plaid": 0, "skipped": 0}
     for t in txs:
         action = _apply_rules(t, rules)
@@ -7875,12 +7913,22 @@ async def get_company_dashboard(company_id: str, authorization: str = Header(Non
     ytd_net     = ytd_revenue - ytd_expense
 
     # 12-month trend: monthly net (from raw cash flow aggregation)
-    trend_txs = await _sb_select("transactions", {
-        "company_id": f"eq.{sb_company_id}",
-        "is_transfer": "eq.false",
-        "and": f"(date.gte.{twelve_months_ago},date.lte.{today.isoformat()})",
-        "select": "date,amount", "limit": "50000",
-    })
+    trend_txs: list = []
+    offset = 0
+    while True:
+        chunk = await _sb_select("transactions", {
+            "company_id": f"eq.{sb_company_id}",
+            "is_transfer": "eq.false",
+            "and": f"(date.gte.{twelve_months_ago},date.lte.{today.isoformat()})",
+            "select": "date,amount",
+            "order": "id",
+            "limit": "1000",
+            "offset": str(offset),
+        })
+        trend_txs.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
     by_month: dict = {}
     for t in trend_txs:
         d = (t.get("date") or "")[:7]
