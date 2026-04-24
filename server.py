@@ -7733,6 +7733,7 @@ async def list_transactions(
     account_id: Optional[str] = None,
     plaid_item_id: Optional[str] = None,
     category_id: Optional[str] = None,
+    vendor_id: Optional[str] = None,
     uncategorized_only: bool = False,
     transfers_only: bool = False,
     include_transfers: bool = True,
@@ -7781,6 +7782,8 @@ async def list_transactions(
         and_clauses.append(f"account_id.in.({','.join(account_ids_filter)})")
     if category_id:
         and_clauses.append(f"category_id.eq.{category_id}")
+    if vendor_id:
+        and_clauses.append(f"vendor_id.eq.{vendor_id}")
     if uncategorized_only:
         and_clauses.append("category_id.is.null")
         and_clauses.append("is_transfer.eq.false")
