@@ -29,7 +29,7 @@ import secrets
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from urllib.parse import urlencode
 
 # ---------- Logging ----------
@@ -2363,6 +2363,7 @@ class ReportParams(BaseModel):
     company_id: Optional[str] = None  # specific company UUID | "all" for consolidated
     company_ids: Optional[list] = None  # list of company UUIDs for multi-select consolidated
     by_company: Optional[bool] = False  # return per-company breakdown alongside consolidated total
+    summarize_column_by: Optional[str] = None  # "Month" | "Quarter" | "Year" | None (Total only)
 
 
 async def _manual_company_by_id(company_id: str, org_id: str) -> Optional[dict]:
@@ -2411,7 +2412,10 @@ async def _collect_plaid_reports(
     for c in manual:
         try:
             if report_kind == "profit_loss":
-                rpt = await _plaid_pl(c["supabase_company_id"], start, end)
+                rpt = await _plaid_pl(
+                    c["supabase_company_id"], start, end,
+                    summarize_column_by=getattr(params, "summarize_column_by", None),
+                )
             elif report_kind == "balance_sheet":
                 rpt = await _plaid_balance_sheet(c["supabase_company_id"], end)
             elif report_kind == "cash_flow":
@@ -2435,7 +2439,10 @@ async def get_profit_loss(params: ReportParams, authorization: str = Header(None
         mc = await _manual_company_by_id(params.company_id, org_id)
         if mc:
             start, end = _plaid_period(params)
-            rpt = await _plaid_pl(mc["supabase_company_id"], start, end)
+            rpt = await _plaid_pl(
+                mc["supabase_company_id"], start, end,
+                summarize_column_by=params.summarize_column_by,
+            )
             return {"current": rpt, "source": "plaid",
                     "companies": [{"name": mc["name"], "company_id": mc["id"]}]}
 
@@ -2851,6 +2858,8 @@ async def _get_live_report_for_company(params, qbo_report_name, report_type):
             qbo_params["start_date"] = params.start_date
         if params.end_date:
             qbo_params["end_date"] = params.end_date
+        if params.summarize_column_by:
+            qbo_params["summarize_column_by"] = params.summarize_column_by
 
         current = await qbo_get_report(db, params.company_id, qbo_report_name, qbo_params)
         result = {"current": current}
@@ -6850,44 +6859,244 @@ def _qbo_section(group_name: str, header_label: str, total_label: str,
     }
 
 
-def _qbo_summary_row(group_name: str, label: str, total: float, columns: int = 2) -> dict:
+def _qbo_summary_row(group_name: str, label: str, total, columns: int = 2) -> dict:
+    # `total` may be a scalar (Total-only column) or a list of per-period values
+    # followed by an optional grand total. The ColData length is computed as
+    # 1 label + N period values.
+    if isinstance(total, (list, tuple)):
+        cols = [{"value": label}] + [{"value": f"{v:.2f}"} for v in total]
+    else:
+        cols = [{"value": label}, {"value": f"{total:.2f}"}]
     return {
         "type": "Section",
         "group": group_name,
-        "Summary": {"ColData": [
-            {"value": label}, {"value": f"{total:.2f}"},
-        ]},
+        "Summary": {"ColData": cols},
     }
 
 
-async def _plaid_pl(sb_company_id: str, start_date: str, end_date: str) -> dict:
-    """Return a QBO-shaped P&L dict for a manual company."""
-    buckets = await _sum_plaid_by_coa_type(sb_company_id, start_date, end_date)
-    income_rows = [{"name": r["name"], "total": r["total"]}
-                   for r in sorted(buckets["income"], key=lambda r: r["code"])]
-    expense_rows = [{"name": r["name"], "total": r["total"]}
-                    for r in sorted(buckets["expense"], key=lambda r: r["code"])]
-    if buckets["uncategorized_expense_total"]:
+def _period_buckets(start_date: str, end_date: str, summarize_by: Optional[str]) -> list:
+    """Return a list of (period_start, period_end, label) tuples.
+
+    - summarize_by=None/""  → single bucket covering [start_date, end_date]
+    - summarize_by="Month"  → one bucket per calendar month
+    - summarize_by="Quarter"→ one per calendar quarter
+    - summarize_by="Year"   → one per calendar year
+    All clipped to [start_date, end_date].
+    """
+    try:
+        s = datetime.strptime(start_date, "%Y-%m-%d").date()
+        e = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except Exception:
+        return [(start_date, end_date, end_date)]
+    mode = (summarize_by or "").lower()
+    if mode not in ("month", "quarter", "year"):
+        return [(start_date, end_date, end_date)]
+
+    out: list = []
+    if mode == "month":
+        cur = s.replace(day=1)
+        while cur <= e:
+            last = calendar.monthrange(cur.year, cur.month)[1]
+            pe = cur.replace(day=last)
+            ps = max(cur, s); pe2 = min(pe, e)
+            label = cur.strftime("%b %Y")
+            out.append((ps.isoformat(), pe2.isoformat(), label))
+            # advance
+            ny = cur.year + (1 if cur.month == 12 else 0)
+            nm = 1 if cur.month == 12 else cur.month + 1
+            cur = cur.replace(year=ny, month=nm, day=1)
+    elif mode == "quarter":
+        q_start_month = ((s.month - 1) // 3) * 3 + 1
+        cur = s.replace(month=q_start_month, day=1)
+        while cur <= e:
+            em = cur.month + 2
+            ey = cur.year
+            if em > 12:
+                em -= 12; ey += 1
+            last = calendar.monthrange(ey, em)[1]
+            pe = date(ey, em, last)
+            ps = max(cur, s); pe2 = min(pe, e)
+            label = f"Q{(cur.month - 1)//3 + 1} {cur.year}"
+            out.append((ps.isoformat(), pe2.isoformat(), label))
+            # advance 3 months
+            nm = cur.month + 3
+            ny = cur.year
+            if nm > 12:
+                nm -= 12; ny += 1
+            cur = date(ny, nm, 1)
+    elif mode == "year":
+        cur = date(s.year, 1, 1)
+        while cur <= e:
+            pe = date(cur.year, 12, 31)
+            ps = max(cur, s); pe2 = min(pe, e)
+            out.append((ps.isoformat(), pe2.isoformat(), str(cur.year)))
+            cur = date(cur.year + 1, 1, 1)
+    return out
+
+
+async def _sum_plaid_by_coa_and_period(
+    sb_company_id: str, periods: list,
+) -> dict:
+    """Return {'income': {coa_id: {name, code, totals:[..]}}, 'expense': {...}, 'asset': {...},
+    'liability': {...}, 'equity': {...}, 'uncategorized_expense_totals': [..]}.
+    totals[i] corresponds to periods[i].
+    """
+    overall_start = min(p[0] for p in periods)
+    overall_end   = max(p[1] for p in periods)
+
+    # Fetch all transactions across the overall span with pagination
+    txs: list = []
+    offset = 0
+    while True:
+        chunk = await _sb_select("transactions", {
+            "company_id": f"eq.{sb_company_id}",
+            "is_transfer": "eq.false",
+            "and": f"(date.gte.{overall_start},date.lte.{overall_end})",
+            "select": "amount,category_id,date",
+            "order": "id",
+            "limit": "1000",
+            "offset": str(offset),
+        })
+        txs.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
+
+    cat_ids = list({t["category_id"] for t in txs if t.get("category_id")})
+    cat_to_coa: dict = {}
+    if cat_ids:
+        cats = await _sb_select("categories", {
+            "id": f"in.({','.join(cat_ids)})", "select": "id,coa_account_id",
+        })
+        cat_to_coa = {c["id"]: c.get("coa_account_id") for c in cats}
+
+    coa_map = await _load_plaid_coa_rows(sb_company_id)
+
+    buckets: dict = {"income": {}, "expense": {}, "asset": {}, "liability": {}, "equity": {}}
+    n = len(periods)
+    uncat = [0.0] * n
+    # Precompute period index lookup by date string comparison
+    def _period_idx(d: str) -> int:
+        for i, (ps, pe, _lbl) in enumerate(periods):
+            if ps <= d <= pe:
+                return i
+        return -1
+
+    for t in txs:
+        idx = _period_idx(t.get("date") or "")
+        if idx < 0:
+            continue
+        cid = t.get("category_id")
+        coa_id = cat_to_coa.get(cid) if cid else None
+        coa = coa_map.get(coa_id) if coa_id else None
+        amt = float(t.get("amount") or 0)
+        if not coa:
+            uncat[idx] += amt
+            continue
+        coa_type = coa["type"]
+        if coa_type not in buckets:
+            continue
+        # Plaid: positive = outflow. For income, flip so inflow = positive income.
+        if coa_type == "income":
+            amt = -amt
+        key = coa_id
+        b = buckets[coa_type]
+        if key not in b:
+            b[key] = {"coa_id": coa_id, "code": coa["code"],
+                      "name": coa["name"], "totals": [0.0] * n}
+        b[key]["totals"][idx] += amt
+
+    return {"buckets": buckets, "uncategorized_expense_totals": uncat,
+            "periods": periods}
+
+
+async def _plaid_pl(sb_company_id: str, start_date: str, end_date: str,
+                    summarize_column_by: Optional[str] = None) -> dict:
+    """Return a QBO-shaped P&L dict for a manual company.
+    When summarize_column_by is Month/Quarter/Year, returns one column per
+    period PLUS a trailing Total column.
+    """
+    periods = _period_buckets(start_date, end_date, summarize_column_by)
+    data = await _sum_plaid_by_coa_and_period(sb_company_id, periods)
+    buckets = data["buckets"]
+    uncat_totals = data["uncategorized_expense_totals"]
+    n = len(periods)
+    multi = bool(summarize_column_by) and n > 1
+
+    def _make_rows(bucket: dict) -> list:
+        rows = []
+        for r in sorted(bucket.values(), key=lambda r: r["code"]):
+            totals = r["totals"]
+            row = {"name": r["name"], "totals": totals,
+                   "grand": round(sum(totals), 2)}
+            rows.append(row)
+        return rows
+
+    income_rows  = _make_rows(buckets["income"])
+    expense_rows = _make_rows(buckets["expense"])
+    if any(abs(v) > 0.005 for v in uncat_totals):
         expense_rows.append({"name": "Uncategorized",
-                             "total": buckets["uncategorized_expense_total"]})
+                             "totals": list(uncat_totals),
+                             "grand": round(sum(uncat_totals), 2)})
 
-    total_income = sum(r["total"] for r in income_rows)
-    total_expense = sum(r["total"] for r in expense_rows)
-    net_income = total_income - total_expense
+    def _section_totals(rows):
+        totals_per_period = [0.0] * n
+        for r in rows:
+            for i, v in enumerate(r["totals"]):
+                totals_per_period[i] += v
+        return totals_per_period, round(sum(totals_per_period), 2)
 
-    label = end_date or ""
+    income_section_totals, total_income_grand = _section_totals(income_rows)
+    expense_section_totals, total_expense_grand = _section_totals(expense_rows)
+    net_section_totals = [round(income_section_totals[i] - expense_section_totals[i], 2)
+                          for i in range(n)]
+    net_income_grand = round(total_income_grand - total_expense_grand, 2)
+
+    # Build Columns: [Account, <period labels...>, (Total if multi)]
+    columns = [{"ColTitle": "", "ColType": "Account"}]
+    for (_ps, _pe, label) in periods:
+        columns.append({"ColTitle": label, "ColType": "Money"})
+    if multi:
+        columns.append({"ColTitle": "Total", "ColType": "Money"})
+
+    def _row_coldata(row) -> list:
+        vals = [{"value": row["name"]}] + [{"value": f"{v:.2f}"} for v in row["totals"]]
+        if multi:
+            vals.append({"value": f"{row['grand']:.2f}"})
+        return vals
+
+    def _section_block(group: str, header: str, total_label: str,
+                       rows: list, per_period_totals: list, grand: float) -> dict:
+        row_objs = [{"ColData": _row_coldata(r)} for r in rows]
+        summary_vals = [{"value": total_label}] + [{"value": f"{v:.2f}"} for v in per_period_totals]
+        if multi:
+            summary_vals.append({"value": f"{grand:.2f}"})
+        header_row = [{"value": header}] + [{"value": ""}] * (len(columns) - 1)
+        return {
+            "type": "Section",
+            "group": group,
+            "Header": {"ColData": header_row},
+            "Rows": {"Row": row_objs},
+            "Summary": {"ColData": summary_vals},
+        }
+
+    net_summary_vals = [{"value": "Net Income"}] + [{"value": f"{v:.2f}"} for v in net_section_totals]
+    if multi:
+        net_summary_vals.append({"value": f"{net_income_grand:.2f}"})
+
     return {
         "Header": {"StartPeriod": start_date, "EndPeriod": end_date,
                    "ReportName": "ProfitAndLoss", "Source": "plaid",
-                   "Currency": "USD"},
-        "Columns": {"Column": [
-            {"ColTitle": "", "ColType": "Account"},
-            {"ColTitle": label, "ColType": "Money"},
-        ]},
+                   "Currency": "USD",
+                   "SummarizeColumnsBy": summarize_column_by or "Total"},
+        "Columns": {"Column": columns},
         "Rows": {"Row": [
-            _qbo_section("Income", "Income", "Total Income", income_rows, total_income),
-            _qbo_section("Expenses", "Expenses", "Total Expenses", expense_rows, total_expense),
-            _qbo_summary_row("NetIncome", "Net Income", net_income),
+            _section_block("Income", "Income", "Total Income", income_rows,
+                           income_section_totals, total_income_grand),
+            _section_block("Expenses", "Expenses", "Total Expenses", expense_rows,
+                           expense_section_totals, total_expense_grand),
+            {"type": "Section", "group": "NetIncome",
+             "Summary": {"ColData": net_summary_vals}},
         ]},
     }
 
