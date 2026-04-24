@@ -10388,7 +10388,7 @@ async def detect_transfers(
             "is_transfer": "eq.false",
             "transfer_pair_id": "is.null",
             "and": f"(date.gte.{body.date_from},date.lte.{body.date_to})",
-            "select": "id,company_id,account_id,date,amount,merchant_name,description",
+            "select": "id,company_id,account_id,date,amount,merchant_name,description,vendor_id",
             "order": "id",
             "limit": "1000",
             "offset": str(offset),
@@ -10434,6 +10434,11 @@ async def detect_transfers(
                 candidate_amts.add(round(cents / 100, 2))
         best = None
         best_score = 0.0
+        om = (out.get("merchant_name") or out.get("description") or "").lower()
+        transfer_kw = ("transfer", "xfer", "zelle", "ach", "wire", "online bank",
+                       "book tran", "internal tran", "a2a", "from account", "to account",
+                       "from checking", "to checking", "from savings", "to savings")
+        out_looks_transfer = any(k in om for k in transfer_kw)
         for amt in candidate_amts:
             for inc in inflow_by_amt.get(amt, []):
                 if inc["id"] in used_inflow_ids:
@@ -10445,27 +10450,43 @@ async def detect_transfers(
                 # just posting noise, not a transfer)
                 if inc.get("account_id") == out.get("account_id"):
                     continue
+                # If both sides share the same vendor, this is almost certainly
+                # a refund or two unrelated transactions at the same place, not
+                # a bank-to-bank transfer.
+                if out.get("vendor_id") and out.get("vendor_id") == inc.get("vendor_id"):
+                    continue
                 inc_date = _parse_d(inc.get("date"))
                 if not out_date or not inc_date:
                     continue
                 days_diff = abs((inc_date - out_date).days)
                 if days_diff > window:
                     continue
-                # Score: exact amount + closeness in date + merchant similarity
-                s = 0.5  # base: amounts match within tolerance
-                s += max(0, 1 - days_diff / max(window, 1)) * 0.3
-                # Name similarity (cheap check)
-                om = (out.get("merchant_name") or out.get("description") or "").lower()
+
                 im = (inc.get("merchant_name") or inc.get("description") or "").lower()
-                if om and im:
-                    tokens_o = set(om.split())
-                    tokens_i = set(im.split())
-                    overlap = len(tokens_o & tokens_i)
-                    if overlap:
-                        s += min(0.2, overlap * 0.05)
-                # Intercompany = natural transfer, bump score
-                if out_co != inc_co:
-                    s += 0.05
+                # Exact or near-identical merchant names across the pair are a
+                # STRONG signal it's NOT a transfer (transfers typically name
+                # the counterparty account, not a vendor). Skip outright.
+                if om and im and om == im:
+                    continue
+                tokens_o = set(w for w in om.split() if len(w) > 3)
+                tokens_i = set(w for w in im.split() if len(w) > 3)
+                overlap = len(tokens_o & tokens_i)
+                # If most of the significant tokens are shared (>= 60%), skip.
+                shorter = min(len(tokens_o), len(tokens_i)) if tokens_o and tokens_i else 0
+                if shorter >= 2 and overlap / shorter >= 0.6:
+                    continue
+
+                # Score:
+                #   base 0.4 for amount match within tolerance
+                #   + up to 0.3 for closeness in date
+                #   + up to 0.25 for transfer-keyword hits on either side
+                #   + 0.05 intercompany bonus
+                s = 0.4
+                s += max(0, 1 - days_diff / max(window, 1)) * 0.3
+                inc_looks_transfer = any(k in im for k in transfer_kw)
+                if out_looks_transfer: s += 0.15
+                if inc_looks_transfer: s += 0.15
+                if out_co != inc_co:   s += 0.05
                 if s > best_score:
                     best_score = s
                     best = inc
@@ -10494,6 +10515,9 @@ async def detect_transfers(
                 },
                 "is_intercompany": out["company_id"] != best["company_id"],
             })
+    # Drop low-confidence suggestions — otherwise the user gets flooded with
+    # coincidentally-equal amounts that aren't transfers at all.
+    pairs = [p for p in pairs if p["score"] >= 0.6]
     pairs.sort(key=lambda p: p["score"], reverse=True)
     return {"pairs": pairs[:500], "scanned": len(txs),
             "outflows_scanned": len(outflows),
