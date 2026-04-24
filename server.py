@@ -6327,7 +6327,132 @@ async def _plaid_sync_transactions(sb_item: dict) -> dict:
             "status": "good",
         },
     )
+
+    # Auto-detect transfer pairs across all companies this user can see.
+    # Matches Financials' sync flow: pairs are committed immediately; no
+    # manual Scan/Confirm step required.
+    try:
+        pair_result = await _auto_detect_transfer_pairs([sb_company_id])
+        totals["transfers_paired"] = pair_result.get("paired", 0)
+    except Exception as e:
+        logger.info("Auto transfer-detect skipped: %s", str(e)[:200])
+
     return totals
+
+
+async def _auto_detect_transfer_pairs(company_ids: list) -> dict:
+    """Port of Financials' lib/categorize/detect-transfers.ts.
+
+    Pairs two transactions as an is_transfer = true pair when:
+      - amounts are EXACT opposites (a + b == 0 to the cent, Plaid convention
+        has +=outflow)
+      - different account_id
+      - dated within ±3 days
+      - neither already in a pair
+
+    If multiple candidates match, prefer the same-company one when there's
+    exactly one; otherwise skip (ambiguous). Commits pairs directly —
+    no user confirmation step.
+    """
+    if not company_ids:
+        return {"paired": 0, "scanned": 0, "ambiguous": 0}
+
+    # Pass 1: clear orphan pair ids (any pair_id referenced by != 2 rows).
+    paired_rows = await _sb_select("transactions", {
+        "company_id": f"in.({','.join(company_ids)})",
+        "transfer_pair_id": "not.is.null",
+        "select": "id,transfer_pair_id", "limit": "5000",
+    })
+    by_pair: dict = {}
+    for r in paired_rows:
+        by_pair.setdefault(r["transfer_pair_id"], []).append(r["id"])
+    orphan_ids = [rid for pid, rids in by_pair.items() if len(rids) != 2 for rid in rids]
+    for i in range(0, len(orphan_ids), 200):
+        batch = orphan_ids[i:i + 200]
+        if batch:
+            await _sb_update(
+                "transactions", {"id": f"in.({','.join(batch)})"},
+                {"transfer_pair_id": None, "is_transfer": False},
+            )
+
+    # Pass 2: pull unpaired candidate rows + index by rounded amount.
+    rows: list = []
+    offset = 0
+    while True:
+        chunk = await _sb_select("transactions", {
+            "company_id": f"in.({','.join(company_ids)})",
+            "transfer_pair_id": "is.null",
+            "select": "id,account_id,company_id,date,amount",
+            "order": "date",
+            "limit": "1000", "offset": str(offset),
+        })
+        rows.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
+
+    from collections import defaultdict
+    from datetime import date as _d
+    by_amount = defaultdict(list)
+    for r in rows:
+        key = f"{float(r['amount']):.4f}"
+        by_amount[key].append(r)
+
+    def _parse(s):
+        try: return _d.fromisoformat(str(s)[:10])
+        except Exception: return None
+
+    WINDOW = 3
+    used: set = set()
+    pairs: list = []
+    ambiguous = 0
+    for row in rows:
+        if row["id"] in used:
+            continue
+        amt = float(row["amount"] or 0)
+        if amt == 0:
+            continue
+        opp_key = f"{-amt:.4f}"
+        rd = _parse(row["date"])
+        if not rd:
+            continue
+        candidates = []
+        for c in by_amount.get(opp_key, []):
+            if c["id"] in used or c["id"] == row["id"]:
+                continue
+            if c["account_id"] == row["account_id"]:
+                continue
+            cd = _parse(c["date"])
+            if not cd or abs((cd - rd).days) > WINDOW:
+                continue
+            candidates.append(c)
+        if not candidates:
+            continue
+        match = None
+        if len(candidates) == 1:
+            match = candidates[0]
+        else:
+            same_co = [c for c in candidates if c["company_id"] == row["company_id"]]
+            if len(same_co) == 1:
+                match = same_co[0]
+            else:
+                ambiguous += 1
+                continue
+        pair_id = str(uuid.uuid4())
+        pairs.append((row["id"], match["id"], pair_id))
+        used.add(row["id"])
+        used.add(match["id"])
+
+    for a, b, pid in pairs:
+        try:
+            await _sb_update(
+                "transactions", {"id": f"in.({a},{b})"},
+                {"is_transfer": True, "transfer_pair_id": pid},
+            )
+        except Exception as e:
+            logger.debug("Transfer pair update failed: %s", str(e)[:150])
+
+    return {"paired": len(pairs), "scanned": len(rows), "ambiguous": ambiguous}
 
 
 # ---------- Webhook JWS verification (port of verify-webhook.ts) ----------
