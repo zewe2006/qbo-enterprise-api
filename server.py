@@ -9894,6 +9894,129 @@ async def match_suggestions(
     }
 
 
+class MatchBatchBody(BaseModel):
+    company_id: str
+    transaction_ids: list       # list of v2 transaction ids to hydrate
+    date_window_days: Optional[int] = 14
+    amount_tolerance_pct: Optional[float] = 0.01
+
+
+@app.post("/api/payments/match-suggestions/batch")
+async def match_suggestions_batch(
+    body: MatchBatchBody, authorization: str = Header(None),
+):
+    """For each txn id in the batch, return the top single invoice OR bill
+    candidate (whichever score is higher). Used by the Transactions page to
+    show QBO-style "matched invoice" hints inline.
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(body.company_id, user)
+    sb_id = company["supabase_company_id"]
+    if not body.transaction_ids:
+        return {"matches": {}}
+
+    # Pull the transactions in one go
+    txs = await _sb_select("transactions", {
+        "id": f"in.({','.join(body.transaction_ids)})",
+        "company_id": f"eq.{sb_id}",
+        "select": "id,date,amount,merchant_name,description,customer_id,vendor_id",
+        "limit": "1000",
+    })
+    if not txs:
+        return {"matches": {}}
+
+    # Pull all open invoices + bills once
+    open_invs = await _sb_select("invoices", {
+        "company_id": f"eq.{sb_id}",
+        "status": "not.in.(paid,void)",
+        "select": "id,number,date,due_date,total,balance,customer_id",
+        "limit": "2000",
+    })
+    open_bills = await _sb_select("bills", {
+        "company_id": f"eq.{sb_id}",
+        "status": "not.in.(paid,void)",
+        "select": "id,number,date,due_date,total,balance,vendor_id",
+        "limit": "2000",
+    })
+
+    # Hydrate party names
+    cust_ids = list({r["customer_id"] for r in open_invs if r.get("customer_id")})
+    vend_ids = list({r["vendor_id"] for r in open_bills if r.get("vendor_id")})
+    cmap: dict = {}; vmap: dict = {}
+    if cust_ids:
+        cs = await _sb_select("customers", {
+            "id": f"in.({','.join(cust_ids)})", "select": "id,display_name",
+        })
+        cmap = {c["id"]: c["display_name"] for c in cs}
+    if vend_ids:
+        vs = await _sb_select("vendors", {
+            "id": f"in.({','.join(vend_ids)})", "select": "id,display_name",
+        })
+        vmap = {v["id"]: v["display_name"] for v in vs}
+
+    from datetime import date as _d
+    dw = body.date_window_days or 14
+    tol_pct = body.amount_tolerance_pct or 0.01
+
+    def _score(tx_amt, tx_date, row, party_name, tol):
+        amt_diff = abs(float(row["balance"]) - tx_amt)
+        s = max(0.0, 1 - amt_diff / max(tol, 0.01)) * 0.5
+        if tx_date and row.get("date"):
+            try:
+                td = _d.fromisoformat(tx_date[:10])
+                rd = _d.fromisoformat(str(row["date"])[:10])
+                s += max(0.0, 1 - abs((td - rd).days) / max(dw, 1)) * 0.3
+            except Exception: pass
+        merch = ""
+        if party_name:
+            merch_name = party_name.lower()
+            if merch_name: s += 0.2
+        return s
+
+    out: dict = {}
+    for tx in txs:
+        tx_amt = abs(float(tx["amount"] or 0))
+        if tx_amt < 0.01:
+            continue
+        tol = max(0.05, tx_amt * tol_pct)
+        lo = tx_amt - tol; hi = tx_amt + tol
+        is_inflow = float(tx["amount"] or 0) < 0  # Plaid: negative = cash in
+        pool = open_invs if is_inflow else open_bills
+        name_map = cmap if is_inflow else vmap
+        party_field = "customer_id" if is_inflow else "vendor_id"
+        kind = "invoice" if is_inflow else "bill"
+
+        best = None; best_s = 0.0
+        for row in pool:
+            bal = float(row.get("balance") or 0)
+            if bal < lo or bal > hi:
+                continue
+            pname = name_map.get(row.get(party_field), "")
+            # Name proximity: boost when the transaction merchant shares tokens
+            merch = (tx.get("merchant_name") or tx.get("description") or "").lower()
+            name_match = False
+            if pname and merch:
+                pn = pname.lower()
+                name_match = pn in merch or merch in pn
+            s = _score(tx_amt, tx.get("date"), row, pname, tol)
+            if name_match: s += 0.05
+            if s > best_s:
+                best_s = s
+                best = {
+                    "kind": kind,
+                    "id": row["id"],
+                    "number": row.get("number"),
+                    "date": row.get("date"),
+                    "balance": float(row["balance"]),
+                    "party": pname or None,
+                    "score": round(s, 3),
+                }
+        if best and best_s >= 0.6:
+            out[tx["id"]] = best
+    return {"matches": out}
+
+
 class MatchApplyBody(BaseModel):
     plaid_txn_id: str
     invoice_id: Optional[str] = None
