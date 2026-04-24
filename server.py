@@ -8368,8 +8368,21 @@ async def preview_rule(body: RulePreviewBody, authorization: str = Header(None))
 
 
 @app.post("/api/rules/{company_id}/recategorize")
-async def recategorize_all(company_id: str, authorization: str = Header(None)):
-    """Re-run rules + PFC fallback across all uncategorized non-transfer transactions."""
+async def recategorize_all(
+    company_id: str,
+    scope: str = "uncategorized",  # uncategorized | non_user | all
+    authorization: str = Header(None),
+):
+    """Re-run rules + PFC fallback across transactions.
+    scope:
+      - uncategorized (default): only rows with category_id IS NULL
+      - non_user: also re-run against 'plaid' / 'qbo_import' / null rows,
+        but never touches categorized_by='user' or 'rule' rows. Use this
+        after creating a new rule to have it override existing Plaid PFC
+        auto-categorization.
+      - all: also includes existing 'rule' rows (in case rules changed).
+        Still preserves 'user'-categorized rows.
+    """
     token = _extract_token(authorization)
     user = get_current_user(token)
     company = _get_manual_company_for_user(company_id, user)
@@ -8384,17 +8397,27 @@ async def recategorize_all(company_id: str, authorization: str = Header(None)):
     })
     category_by_name = {c["name"].lower(): c["id"] for c in categories if c.get("name")}
 
+    # Build filter params per scope
+    base = {
+        "company_id": f"eq.{sb_company_id}",
+        "is_transfer": "eq.false",
+        "select": "id,merchant_name,description,amount,account_id,plaid_pfc,category_id,categorized_by",
+        "order": "id",
+        "limit": "1000",
+    }
+    if scope == "non_user":
+        base["categorized_by"] = "in.(plaid,qbo_import,null)"
+        base["or"] = "(categorized_by.is.null,categorized_by.neq.user)"
+    elif scope == "all":
+        base["or"] = "(categorized_by.is.null,categorized_by.neq.user)"
+    else:
+        base["category_id"] = "is.null"
+
     txs: list = []
     offset = 0
     while True:
-        chunk = await _sb_select("transactions", {
-            "company_id": f"eq.{sb_company_id}",
-            "category_id": "is.null", "is_transfer": "eq.false",
-            "select": "id,merchant_name,description,amount,account_id,plaid_pfc",
-            "order": "id",
-            "limit": "1000",
-            "offset": str(offset),
-        })
+        params = dict(base, offset=str(offset))
+        chunk = await _sb_select("transactions", params)
         txs.extend(chunk)
         if len(chunk) < 1000:
             break
