@@ -6813,11 +6813,11 @@ async def list_plaid_accounts(company_id: str, authorization: str = Header(None)
 # We flip signs so income appears positive and expense appears positive.
 
 async def _load_plaid_coa_rows(sb_company_id: str) -> dict:
-    """Return a map of coa_account_id → {code, name, type}."""
+    """Return a map of coa_account_id → {code, name, type, subtype, parent_id}."""
     coa = await _sb_select(
         "chart_of_accounts",
         {"company_id": f"eq.{sb_company_id}", "is_active": "eq.true",
-         "select": "id,code,name,type"},
+         "select": "id,code,name,type,subtype,parent_id"},
     )
     return {c["id"]: c for c in coa}
 
@@ -7047,86 +7047,249 @@ async def _sum_plaid_by_coa_and_period(
         b = buckets[coa_type]
         if key not in b:
             b[key] = {"coa_id": coa_id, "code": coa["code"],
-                      "name": coa["name"], "totals": [0.0] * n}
+                      "name": coa["name"],
+                      "subtype": coa.get("subtype") or "operating",
+                      "parent_id": coa.get("parent_id"),
+                      "totals": [0.0] * n}
         b[key]["totals"][idx] += amt
 
     return {"buckets": buckets, "uncategorized_expense_totals": uncat,
-            "periods": periods}
+            "periods": periods, "coa_map": coa_map}
+
+
+def _zeros(n: int) -> list:
+    return [0.0] * n
+
+
+def _vec_add(dst: list, src: list) -> None:
+    for i, v in enumerate(src):
+        dst[i] += v
 
 
 async def _plaid_pl(sb_company_id: str, start_date: str, end_date: str,
                     summarize_column_by: Optional[str] = None) -> dict:
-    """Return a QBO-shaped P&L dict for a manual company.
-    When summarize_column_by is Month/Quarter/Year, returns one column per
-    period PLUS a trailing Total column.
-    """
+    """QBO-style P&L with Income / COGS / Gross Profit / Expenses /
+    Net Operating Income / Other Income / Other Expenses / Net Other Income /
+    Net Income sections. Honors parent/child CoA hierarchy (nested rows).
+    When summarize_column_by is Month/Quarter/Year, one column per period
+    plus a trailing Total column."""
     periods = _period_buckets(start_date, end_date, summarize_column_by)
+    n = len(periods)
     data = await _sum_plaid_by_coa_and_period(sb_company_id, periods)
     buckets = data["buckets"]
     uncat_totals = data["uncategorized_expense_totals"]
-    n = len(periods)
+    coa_map = data["coa_map"]
     multi = bool(summarize_column_by) and n > 1
 
-    def _make_rows(bucket: dict) -> list:
-        rows = []
-        for r in sorted(bucket.values(), key=lambda r: r["code"]):
-            totals = r["totals"]
-            row = {"name": r["name"], "totals": totals,
-                   "grand": round(sum(totals), 2)}
-            rows.append(row)
-        return rows
+    # Build the union of CoA rows we care about for P&L (income + expense).
+    # Include rows with zero activity if they sit as parents in the tree —
+    # drop them later if they have no descendants.
+    pl_rows: dict = {}  # coa_id → { code, name, subtype, parent_id, totals, own_totals, children:[] }
+    for bucket_name in ("income", "expense"):
+        for r in buckets[bucket_name].values():
+            pl_rows[r["coa_id"]] = {
+                "coa_id":    r["coa_id"],
+                "code":      r["code"],
+                "name":      r["name"],
+                "type":      bucket_name,
+                "subtype":   r.get("subtype") or "operating",
+                "parent_id": r.get("parent_id"),
+                "own":       list(r["totals"]),
+                "children":  [],
+            }
 
-    income_rows  = _make_rows(buckets["income"])
-    expense_rows = _make_rows(buckets["expense"])
-    if any(abs(v) > 0.005 for v in uncat_totals):
-        expense_rows.append({"name": "Uncategorized",
-                             "totals": list(uncat_totals),
-                             "grand": round(sum(uncat_totals), 2)})
+    # Any parent not already represented needs to be pulled in as a stub so
+    # the tree is complete. Walk up from every leaf.
+    def _ensure_parents():
+        to_add: dict = {}
+        for r in list(pl_rows.values()) + list(to_add.values()):
+            cur = r
+            while cur.get("parent_id") and cur["parent_id"] in coa_map:
+                pid = cur["parent_id"]
+                if pid in pl_rows or pid in to_add:
+                    cur = pl_rows.get(pid) or to_add[pid]
+                    continue
+                p = coa_map[pid]
+                if p.get("type") not in ("income", "expense"):
+                    break
+                stub = {
+                    "coa_id": pid,
+                    "code": p.get("code") or "",
+                    "name": p.get("name") or "",
+                    "type": p["type"],
+                    "subtype": p.get("subtype") or "operating",
+                    "parent_id": p.get("parent_id"),
+                    "own": _zeros(n),
+                    "children": [],
+                }
+                to_add[pid] = stub
+                cur = stub
+        pl_rows.update(to_add)
+    _ensure_parents()
 
-    def _section_totals(rows):
-        totals_per_period = [0.0] * n
-        for r in rows:
-            for i, v in enumerate(r["totals"]):
-                totals_per_period[i] += v
-        return totals_per_period, round(sum(totals_per_period), 2)
+    # Build child arrays
+    for r in pl_rows.values():
+        pid = r.get("parent_id")
+        if pid and pid in pl_rows:
+            pl_rows[pid]["children"].append(r)
 
-    income_section_totals, total_income_grand = _section_totals(income_rows)
-    expense_section_totals, total_expense_grand = _section_totals(expense_rows)
-    net_section_totals = [round(income_section_totals[i] - expense_section_totals[i], 2)
-                          for i in range(n)]
-    net_income_grand = round(total_income_grand - total_expense_grand, 2)
+    # Classify into QBO-style sections. Subtypes: operating, other_income,
+    # other_expense, cogs. Fallbacks: type=expense + code starting with "5" → cogs.
+    def _classify(r):
+        st = r.get("subtype") or "operating"
+        t  = r["type"]
+        if t == "income":
+            return "other_income" if st == "other_income" else "income"
+        # expense
+        if st == "other_expense":
+            return "other_expense"
+        if st == "cogs" or (r.get("code") or "").startswith("5"):
+            return "cogs"
+        return "expense"
 
-    # Build Columns: [Account, <period labels...>, (Total if multi)]
+    # Only root-level rows (no parent, or parent not in pl_rows) go into the
+    # top-level section. Children are nested under their parent.
+    sections: dict = {"income": [], "cogs": [], "expense": [],
+                      "other_income": [], "other_expense": []}
+    for r in pl_rows.values():
+        pid = r.get("parent_id")
+        if pid and pid in pl_rows:
+            continue  # will be rendered under its parent
+        sec = _classify(r)
+        sections[sec].append(r)
+
+    # ---- Column definitions ---------------------------------------------------
     columns = [{"ColTitle": "", "ColType": "Account"}]
     for (_ps, _pe, label) in periods:
         columns.append({"ColTitle": label, "ColType": "Money"})
     if multi:
         columns.append({"ColTitle": "Total", "ColType": "Money"})
 
-    def _row_coldata(row) -> list:
-        vals = [{"value": row["name"]}] + [{"value": f"{v:.2f}"} for v in row["totals"]]
+    def _fmt_row(name: str, totals: list) -> dict:
+        vals = [{"value": name}] + [{"value": f"{v:.2f}"} for v in totals]
         if multi:
-            vals.append({"value": f"{row['grand']:.2f}"})
-        return vals
+            vals.append({"value": f"{round(sum(totals), 2):.2f}"})
+        return {"ColData": vals}
 
-    def _section_block(group: str, header: str, total_label: str,
-                       rows: list, per_period_totals: list, grand: float) -> dict:
-        row_objs = [{"ColData": _row_coldata(r)} for r in rows]
-        summary_vals = [{"value": total_label}] + [{"value": f"{v:.2f}"} for v in per_period_totals]
+    def _fmt_summary(label: str, totals: list) -> dict:
+        vals = [{"value": label}] + [{"value": f"{v:.2f}"} for v in totals]
         if multi:
-            summary_vals.append({"value": f"{grand:.2f}"})
+            vals.append({"value": f"{round(sum(totals), 2):.2f}"})
+        return {"ColData": vals}
+
+    # Render one CoA node (+ any descendants) into QBO-shape rows. Returns
+    # (rendered_row_obj, aggregated_totals). If the node has children, we emit
+    # a Section; otherwise a plain ColData row.
+    def _render_node(node, sign: int = 1) -> tuple:
+        own = [v * sign for v in node["own"]]
+        if not node["children"]:
+            # Leaf row
+            if all(abs(v) < 0.005 for v in own):
+                return None, own  # drop zero-activity leaves
+            return _fmt_row(node["name"], own), own
+
+        # Parent with children
+        child_row_objs: list = []
+        agg = list(own)
+        # Emit the parent's OWN activity as a leaf row inside the section (QBO
+        # convention) only when it's non-zero.
+        if any(abs(v) > 0.005 for v in own):
+            child_row_objs.append(_fmt_row(node["name"], own))
+        # Sort children by code, render each
+        for ch in sorted(node["children"], key=lambda r: (r.get("code") or "")):
+            row_obj, ch_totals = _render_node(ch, sign=sign)
+            if row_obj is not None:
+                child_row_objs.append(row_obj)
+            for i, v in enumerate(ch_totals):
+                agg[i] += v
+        if not child_row_objs:
+            return None, agg
+        header = [{"value": node["name"]}] + [{"value": ""}] * (len(columns) - 1)
+        section = {
+            "type": "Section",
+            "Header": {"ColData": header},
+            "Rows": {"Row": child_row_objs},
+            "Summary": {"ColData": _fmt_summary(f"Total {node['name']}", agg)["ColData"]},
+        }
+        return section, agg
+
+    def _render_section(group: str, header: str, total_label: str,
+                        nodes: list, sign: int = 1) -> tuple:
+        row_objs: list = []
+        totals = _zeros(n)
+        for node in sorted(nodes, key=lambda r: (r.get("code") or "")):
+            obj, agg = _render_node(node, sign=sign)
+            if obj is not None:
+                row_objs.append(obj)
+            _vec_add(totals, agg)
+        if not row_objs:
+            # Still emit an empty section? Skip if no rows.
+            return None, totals
         header_row = [{"value": header}] + [{"value": ""}] * (len(columns) - 1)
-        return {
+        section = {
             "type": "Section",
             "group": group,
             "Header": {"ColData": header_row},
             "Rows": {"Row": row_objs},
-            "Summary": {"ColData": summary_vals},
+            "Summary": {"ColData": _fmt_summary(total_label, totals)["ColData"]},
         }
+        return section, totals
 
-    net_summary_vals = [{"value": "Net Income"}] + [{"value": f"{v:.2f}"} for v in net_section_totals]
-    if multi:
-        net_summary_vals.append({"value": f"{net_income_grand:.2f}"})
+    inc_section,   inc_totals   = _render_section("Income", "Income",
+                                                  "Total Income", sections["income"])
+    cogs_section,  cogs_totals  = _render_section("COGS", "Cost of Goods Sold",
+                                                  "Total Cost of Goods Sold", sections["cogs"])
+    exp_section,   exp_totals   = _render_section("Expenses", "Expenses",
+                                                  "Total Expenses", sections["expense"])
+    oi_section,    oi_totals    = _render_section("OtherIncome", "Other Income",
+                                                  "Total Other Income", sections["other_income"])
+    oe_section,    oe_totals    = _render_section("OtherExpenses", "Other Expenses",
+                                                  "Total Other Expenses", sections["other_expense"])
+
+    # Uncategorized → tacked onto Expenses
+    if any(abs(v) > 0.005 for v in uncat_totals):
+        uncat_row = _fmt_row("Uncategorized", list(uncat_totals))
+        if exp_section is None:
+            header_row = [{"value": "Expenses"}] + [{"value": ""}] * (len(columns) - 1)
+            exp_section = {
+                "type": "Section", "group": "Expenses",
+                "Header": {"ColData": header_row},
+                "Rows": {"Row": [uncat_row]},
+                "Summary": {"ColData": _fmt_summary("Total Expenses", list(uncat_totals))["ColData"]},
+            }
+            exp_totals = list(uncat_totals)
+        else:
+            exp_section["Rows"]["Row"].append(uncat_row)
+            for i, v in enumerate(uncat_totals):
+                exp_totals[i] += v
+            exp_section["Summary"]["ColData"] = _fmt_summary("Total Expenses", exp_totals)["ColData"]
+
+    # Summary rows: Gross Profit, Net Operating Income, Net Other Income, Net Income
+    gross_profit_totals   = [inc_totals[i] - cogs_totals[i] for i in range(n)]
+    net_operating_totals  = [gross_profit_totals[i] - exp_totals[i] for i in range(n)]
+    net_other_totals      = [oi_totals[i] - oe_totals[i] for i in range(n)]
+    net_income_totals     = [net_operating_totals[i] + net_other_totals[i] for i in range(n)]
+
+    def _summary_row(group: str, label: str, totals: list) -> dict:
+        return {"type": "Section", "group": group,
+                "Summary": {"ColData": _fmt_summary(label, totals)["ColData"]}}
+
+    rows: list = []
+    if inc_section:   rows.append(inc_section)
+    if cogs_section:
+        rows.append(cogs_section)
+        rows.append(_summary_row("GrossProfit", "Gross Profit", gross_profit_totals))
+    if exp_section:   rows.append(exp_section)
+    # Only emit Net Operating Income when there's an "other" section following
+    has_other = bool(oi_section or oe_section)
+    if has_other:
+        rows.append(_summary_row("NetOperatingIncome", "Net Operating Income",
+                                  net_operating_totals))
+    if oi_section:    rows.append(oi_section)
+    if oe_section:    rows.append(oe_section)
+    if has_other:
+        rows.append(_summary_row("NetOtherIncome", "Net Other Income", net_other_totals))
+    rows.append(_summary_row("NetIncome", "Net Income", net_income_totals))
 
     return {
         "Header": {"StartPeriod": start_date, "EndPeriod": end_date,
@@ -7134,14 +7297,7 @@ async def _plaid_pl(sb_company_id: str, start_date: str, end_date: str,
                    "Currency": "USD",
                    "SummarizeColumnsBy": summarize_column_by or "Total"},
         "Columns": {"Column": columns},
-        "Rows": {"Row": [
-            _section_block("Income", "Income", "Total Income", income_rows,
-                           income_section_totals, total_income_grand),
-            _section_block("Expenses", "Expenses", "Total Expenses", expense_rows,
-                           expense_section_totals, total_expense_grand),
-            {"type": "Section", "group": "NetIncome",
-             "Summary": {"ColData": net_summary_vals}},
-        ]},
+        "Rows": {"Row": rows},
     }
 
 
@@ -7711,13 +7867,107 @@ async def list_coa(company_id: str, authorization: str = Header(None)):
 
     coa = await _sb_select("chart_of_accounts", {
         "company_id": f"eq.{sb_company_id}",
-        "select": "id,code,name,type,parent_id,is_active,created_at",
+        "select": "id,code,name,type,subtype,parent_id,qbo_account_id,is_active,created_at",
         "order": "code.asc",
     })
     ytd = await _coa_ytd_totals(sb_company_id)
     for row in coa:
         row["ytd_activity"] = round(ytd.get(row["id"], 0.0), 2)
     return {"accounts": coa}
+
+
+class CoAClassifyRequest(BaseModel):
+    source_qbo_company_id: str  # v2 company id of a connected QBO company
+
+
+@app.post("/api/coa/{company_id}/sync-classification")
+async def sync_coa_classification(
+    company_id: str, body: CoAClassifyRequest, authorization: str = Header(None),
+):
+    """Pull QBO Account list from the source company and update the manual
+    company's CoA with matching `subtype` + `qbo_account_id` + `parent_id`.
+    Idempotent — safe to re-run."""
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+    dest = _get_manual_company_for_user(company_id, user)
+    sb_company_id = dest["supabase_company_id"]
+
+    db = get_db()
+    try:
+        src = db.execute(
+            "SELECT id, name, qbo_realm_id, refresh_token FROM companies "
+            "WHERE id = ? AND org_id = ? AND source = 'qbo'",
+            (body.source_qbo_company_id, org_id),
+        ).fetchone()
+        if not src:
+            raise HTTPException(status_code=404, detail="Source QBO company not found")
+        if not src["refresh_token"]:
+            raise HTTPException(status_code=400, detail="Source QBO company is not connected")
+        qbo_acct_data = await qbo_query(
+            db, src["id"],
+            "SELECT Id, Name, AcctNum, AccountType, AccountSubType, ParentRef "
+            "FROM Account WHERE Active = true MAXRESULTS 1000",
+        )
+    finally:
+        db.close()
+
+    qbo_accounts = qbo_acct_data.get("QueryResponse", {}).get("Account", []) or []
+    if not qbo_accounts:
+        return {"ok": True, "updated": 0, "linked_parents": 0,
+                "message": "No QBO accounts returned."}
+
+    coa = await _sb_select("chart_of_accounts", {
+        "company_id": f"eq.{sb_company_id}",
+        "select": "id,name,subtype,qbo_account_id,parent_id",
+        "limit": "2000",
+    })
+    by_name = {(c.get("name") or "").strip().lower(): c for c in coa}
+
+    # Pass 1: set subtype + qbo_account_id on name matches
+    updated = 0
+    for qa in qbo_accounts:
+        name_key = (qa.get("Name") or "").strip().lower()
+        if not name_key:
+            continue
+        row = by_name.get(name_key)
+        if not row:
+            continue
+        patch = {}
+        subtype = _qbo_subtype_from_account(qa)
+        if subtype and row.get("subtype") != subtype:
+            patch["subtype"] = subtype
+        qid = (qa.get("Id") or "").strip()
+        if qid and row.get("qbo_account_id") != qid:
+            patch["qbo_account_id"] = qid
+        if patch:
+            try:
+                await _sb_update("chart_of_accounts", {"id": row["id"]}, patch)
+                row.update(patch)
+                updated += 1
+            except Exception as e:
+                logger.debug("CoA classify update failed for %s: %s", name_key, str(e)[:150])
+
+    # Pass 2: resolve parent_id by QBO Id
+    qid_to_row = {r["qbo_account_id"]: r for r in coa if r.get("qbo_account_id")}
+    linked = 0
+    for qa in qbo_accounts:
+        qid = (qa.get("Id") or "").strip()
+        pref = (qa.get("ParentRef") or {}).get("value") if isinstance(qa.get("ParentRef"), dict) else None
+        if not qid or not pref:
+            continue
+        child = qid_to_row.get(qid)
+        parent = qid_to_row.get(pref)
+        if child and parent and child.get("parent_id") != parent["id"]:
+            try:
+                await _sb_update("chart_of_accounts", {"id": child["id"]},
+                                 {"parent_id": parent["id"]})
+                linked += 1
+            except Exception as e:
+                logger.debug("CoA parent link failed: %s", str(e)[:150])
+
+    return {"ok": True, "updated": updated, "linked_parents": linked,
+            "qbo_accounts_seen": len(qbo_accounts)}
 
 
 class CoACreate(BaseModel):
@@ -8275,6 +8525,21 @@ _COA_CODE_PREFIX_BY_TYPE = {
 }
 
 
+# QBO AccountType → our subtype (influences P&L section placement)
+_QBO_TYPE_TO_SUBTYPE = {
+    "Other Income": "other_income",
+    "Other Expense": "other_expense",
+    "Cost of Goods Sold": "cogs",
+    # Anything else (Income, Expense, Bank, ...) → "operating"
+}
+
+
+def _qbo_subtype_from_account(qbo_account: dict) -> str:
+    """Map a QBO Account entity to our CoA subtype classification."""
+    qtype = qbo_account.get("AccountType") or ""
+    return _QBO_TYPE_TO_SUBTYPE.get(qtype, "operating")
+
+
 async def _auto_map_qbo_to_coa(
     sb_company_id: str, qbo_accounts: list, manual_coa: list, preview: bool = False,
 ) -> tuple:
@@ -8299,10 +8564,26 @@ async def _auto_map_qbo_to_coa(
         qname = (qa.get("Name") or "").strip()
         if not qname:
             continue
-        # 1. Exact name match → reuse
+        qbo_id = (qa.get("Id") or "").strip() or None
+        subtype = _qbo_subtype_from_account(qa)
+
+        # 1. Exact name match → reuse (and opportunistically classify if missing)
         m = coa_by_name.get(qname.lower())
         if m:
             name_to_coa_id[qname.lower()] = m["id"]
+            # Backfill subtype/qbo_account_id if this existing row has nothing set
+            if not preview:
+                patch = {}
+                if qbo_id and not m.get("qbo_account_id"):
+                    patch["qbo_account_id"] = qbo_id
+                if subtype and subtype != "operating" and not m.get("subtype"):
+                    patch["subtype"] = subtype
+                if patch:
+                    try:
+                        await _sb_update("chart_of_accounts", {"id": m["id"]}, patch)
+                        m.update(patch)
+                    except Exception as e:
+                        logger.debug("CoA classify backfill failed for %s: %s", qname, str(e)[:150])
             continue
 
         # 2. Otherwise create a new CoA row
@@ -8332,6 +8613,8 @@ async def _auto_map_qbo_to_coa(
                     "name": qname,
                     "type": coa_type,
                     "is_active": True,
+                    "subtype": subtype,
+                    "qbo_account_id": qbo_id,
                 })
             except HTTPException as e:
                 logger.warning("CoA create failed for %s (%s): %s", qname, code, e.detail)
@@ -8344,9 +8627,41 @@ async def _auto_map_qbo_to_coa(
         created.append({
             "qbo_name": qname,
             "qbo_type": qtype,
+            "qbo_subtype": subtype,
             "coa_code": code,
             "coa_type": coa_type,
         })
+
+    # Post-pass: resolve parent_id from QBO's ParentRef on the freshly written rows.
+    # Do this only if we actually wrote rows (not in preview) and we have a solid
+    # qbo_account_id → coa_id map to look up with.
+    if not preview:
+        try:
+            qbo_to_coa: dict = {}
+            # Refresh the lookup from Supabase so we have ids for rows we just touched
+            refreshed = await _sb_select("chart_of_accounts", {
+                "company_id": f"eq.{sb_company_id}",
+                "select": "id,qbo_account_id,parent_id",
+                "limit": "2000",
+            })
+            for r in refreshed:
+                if r.get("qbo_account_id"):
+                    qbo_to_coa[r["qbo_account_id"]] = r
+            for qa in qbo_accounts:
+                qid = (qa.get("Id") or "").strip()
+                pref = (qa.get("ParentRef") or {}).get("value") if isinstance(qa.get("ParentRef"), dict) else None
+                if not qid or not pref:
+                    continue
+                child = qbo_to_coa.get(qid)
+                parent = qbo_to_coa.get(pref)
+                if child and parent and child.get("parent_id") != parent["id"]:
+                    try:
+                        await _sb_update("chart_of_accounts", {"id": child["id"]},
+                                         {"parent_id": parent["id"]})
+                    except Exception as e:
+                        logger.debug("CoA parent link failed: %s", str(e)[:150])
+        except Exception as e:
+            logger.warning("CoA parent linking skipped: %s", str(e)[:200])
 
     return name_to_coa_id, created
 
@@ -8493,7 +8808,7 @@ async def import_qbo_to_manual(body: QboImportRequest, authorization: str = Head
     try:
         qbo_acct_data = await qbo_query(
             db, src_dict["id"],
-            "SELECT Id, Name, AccountType, AccountSubType, Classification FROM Account "
+            "SELECT Id, Name, AcctNum, AccountType, AccountSubType, Classification, ParentRef FROM Account "
             "WHERE Active = true MAXRESULTS 1000",
         )
     finally:
