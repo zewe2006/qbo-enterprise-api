@@ -2699,20 +2699,111 @@ class TransactionDetailParams(BaseModel):
     company_ids: Optional[list] = None  # for consolidated drill-down
 
 
+async def _supabase_transactions_for_account(
+    sb_company_id: str, account_name: str, start_date: str, end_date: str,
+) -> list:
+    """Return Supabase transaction rows that match the given CoA account name.
+    Output is shaped like _parse_gl_transactions rows so the frontend renders
+    the same columns, but rows keep a `id` field so the UI can offer edit/delete.
+    """
+    # Resolve CoA account by exact name match, then the leaf-name fallback
+    # (handles cases where QBO's "Purchase:Food" was collapsed to "Food").
+    name_key = (account_name or "").strip()
+    if not name_key:
+        return []
+
+    coa = await _sb_select("chart_of_accounts", {
+        "company_id": f"eq.{sb_company_id}",
+        "is_active": "eq.true",
+        "select": "id,code,name",
+        "limit": "2000",
+    })
+    match = None
+    for c in coa:
+        if (c.get("name") or "").strip().lower() == name_key.lower():
+            match = c; break
+    if not match:
+        for c in coa:
+            leaf = (c.get("name") or "").split(":")[-1].strip().lower()
+            if leaf == name_key.lower():
+                match = c; break
+    if not match:
+        return []
+
+    cats = await _sb_select("categories", {
+        "company_id": f"eq.{sb_company_id}",
+        "coa_account_id": f"eq.{match['id']}",
+        "select": "id", "limit": "50",
+    })
+    cat_ids = [c["id"] for c in cats]
+    if not cat_ids:
+        return []
+
+    # Paginate txns (PostgREST caps at 1000/req)
+    s = start_date or "1900-01-01"
+    e = end_date or datetime.now().strftime("%Y-%m-%d")
+    txs: list = []
+    offset = 0
+    while True:
+        chunk = await _sb_select("transactions", {
+            "company_id": f"eq.{sb_company_id}",
+            "category_id": f"in.({','.join(cat_ids)})",
+            "is_transfer": "eq.false",
+            "and": f"(date.gte.{s},date.lte.{e})",
+            "select": "id,date,merchant_name,description,amount,plaid_txn_id,account_id",
+            "order": "date.asc,id",
+            "limit": "1000",
+            "offset": str(offset),
+        })
+        txs.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
+
+    # Shape into GL-like rows expected by the frontend
+    out: list = []
+    for t in txs:
+        amt = float(t.get("amount") or 0)
+        # Plaid convention: positive = outflow → in GL convention, that's a debit to
+        # expense / credit to cash. Show it as-is in the Amount column.
+        debit  = amt if amt > 0 else 0
+        credit = -amt if amt < 0 else 0
+        out.append({
+            "id": t["id"],                 # editable marker
+            "Date": t.get("date") or "",
+            "Transaction Type": "Plaid",
+            "Num": "",
+            "Name": (t.get("merchant_name") or "")[:60],
+            "Memo/Description": (t.get("description") or "")[:200],
+            "Account": account_name,
+            "Debit":  f"{debit:.2f}"  if debit  else "",
+            "Credit": f"{credit:.2f}" if credit else "",
+            "Amount": f"{amt:.2f}",
+            "editable": True,
+        })
+    return out
+
+
 @app.post("/api/reports/transaction-detail")
 async def get_transaction_detail(params: TransactionDetailParams, authorization: str = Header(None)):
-    """Drill down into a specific account — returns transaction-level detail from the QBO
-    GeneralLedger report, across one or more companies."""
+    """Drill down into a specific account. For QBO-connected companies, pull
+    from the QBO GeneralLedger report. For manual/Plaid companies, pull
+    matching rows from Supabase `transactions` so the user can see (and
+    edit/delete) the individual entries.
+    """
     token = _extract_token(authorization)
     user = get_current_user(token)
     org_id = get_org_id(user)
     db = get_db()
 
-    # Determine which companies to query
+    # Select companies — both QBO-connected AND manual/Plaid in the org.
     if params.company_id == "all" or (not params.company_id):
         companies = db.execute(
-            "SELECT id, name, qbo_realm_id, refresh_token FROM companies "
-            "WHERE status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != '' AND org_id = ?",
+            "SELECT id, name, source, qbo_realm_id, refresh_token, supabase_company_id "
+            "FROM companies WHERE org_id = ? AND ("
+            "  (status IN ('connected','synced') AND refresh_token IS NOT NULL AND refresh_token != '') "
+            "  OR (source = 'manual' AND supabase_company_id IS NOT NULL)"
+            ")",
             (org_id,),
         ).fetchall()
         if params.company_ids and len(params.company_ids) > 0:
@@ -2720,7 +2811,8 @@ async def get_transaction_detail(params: TransactionDetailParams, authorization:
             companies = [c for c in companies if c["id"] in selected]
     elif params.company_id:
         companies = db.execute(
-            "SELECT id, name, qbo_realm_id, refresh_token FROM companies WHERE id=? AND org_id = ?",
+            "SELECT id, name, source, qbo_realm_id, refresh_token, supabase_company_id "
+            "FROM companies WHERE id=? AND org_id = ?",
             (params.company_id, org_id),
         ).fetchall()
     else:
@@ -2728,9 +2820,27 @@ async def get_transaction_detail(params: TransactionDetailParams, authorization:
         return {"transactions": [], "message": "Select a company"}
 
     all_transactions = []
+    # Effective date range for manual-company queries. Also used if a QBO
+    # company drill-down wants to fall back cleanly.
+    eff_start, eff_end = _resolve_date_macro(
+        params.date_macro, params.start_date, params.end_date,
+    )
+
     for company in companies:
         try:
-            # Step 1: Look up account ID by name
+            if (company["source"] == "manual" or not company["refresh_token"]) \
+                    and company["supabase_company_id"]:
+                # Plaid / manual company — pull from Supabase
+                rows = await _supabase_transactions_for_account(
+                    company["supabase_company_id"], params.account_name,
+                    eff_start, eff_end,
+                )
+                for r in rows:
+                    r["company"] = company["name"]
+                all_transactions.extend(rows)
+                continue
+
+            # QBO path (existing logic)
             safe_name = params.account_name.replace("'", "\\'")
             acct_data = await qbo_query(db, company["id"],
                 f"SELECT Id, Name FROM Account WHERE Name = '{safe_name}' AND Active = true MAXRESULTS 5")
@@ -2738,8 +2848,6 @@ async def get_transaction_detail(params: TransactionDetailParams, authorization:
             if not acct_list:
                 logger.info("Account '%s' not found in %s", params.account_name, company["name"])
                 continue
-
-            # Use first matching account's ID
             account_id = acct_list[0]["Id"]
 
             qbo_params = {
