@@ -2431,7 +2431,9 @@ async def _collect_plaid_reports(
                     summarize_column_by=getattr(params, "summarize_column_by", None),
                 )
             elif report_kind == "balance_sheet":
-                rpt = await _plaid_balance_sheet(c["supabase_company_id"], end)
+                rpt = await _plaid_balance_sheet(
+                    c["supabase_company_id"], end, org_id=org_id,
+                )
             elif report_kind == "cash_flow":
                 rpt = await _plaid_cash_flow(c["supabase_company_id"], start, end)
             else:
@@ -2621,7 +2623,9 @@ async def get_balance_sheet(params: ReportParams, authorization: str = Header(No
         mc = await _manual_company_by_id(params.company_id, org_id)
         if mc:
             _, end = _plaid_period(params)
-            rpt = await _plaid_balance_sheet(mc["supabase_company_id"], end)
+            rpt = await _plaid_balance_sheet(
+                mc["supabase_company_id"], end, org_id=org_id,
+            )
             return {"current": rpt, "source": "plaid",
                     "companies": [{"name": mc["name"], "company_id": mc["id"]}]}
 
@@ -7301,17 +7305,71 @@ async def _plaid_pl(sb_company_id: str, start_date: str, end_date: str,
     }
 
 
-async def _plaid_balance_sheet(sb_company_id: str, as_of: str) -> dict:
-    """QBO-shaped Balance Sheet aggregated from transactions by CoA type.
-
-    Uses standard accounting sign conventions:
-      - Assets: raw (debit positive, credit negative) → debit balance
-      - Liabilities/Equity: flipped (credit positive, debit negative) → credit balance
-      - Retained Earnings: Net Income (all-time up to as_of)
-
-    Falls back to Plaid live account balances for bank accounts when the
-    transaction stream doesn't cover opening balances.
+async def _find_qbo_source_for_manual(sb_company_id: str, org_id: str) -> Optional[dict]:
+    """If this manual company was populated via QBO → Manual import, return the
+    source QBO company row (sqlite dict) when it's still connected. Detection:
+    look for an accounts row named 'QBO Import · <name>', then match <name> to
+    a connected QBO company in the same org.
     """
+    try:
+        placeholders = await _sb_select("accounts", {
+            "company_id": f"eq.{sb_company_id}",
+            "name": "like.QBO Import · *",
+            "select": "name", "limit": "5",
+        })
+        if not placeholders:
+            return None
+        names = [p["name"].replace("QBO Import · ", "", 1).strip() for p in placeholders]
+        db = get_db()
+        try:
+            for nm in names:
+                row = db.execute(
+                    "SELECT id, name, qbo_realm_id, refresh_token FROM companies "
+                    "WHERE org_id = ? AND source = 'qbo' AND name = ? "
+                    "AND refresh_token IS NOT NULL AND refresh_token != ''",
+                    (org_id, nm),
+                ).fetchone()
+                if row:
+                    return dict(row)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.debug("QBO source lookup failed: %s", str(e)[:150])
+    return None
+
+
+async def _plaid_balance_sheet(sb_company_id: str, as_of: str,
+                               org_id: Optional[str] = None) -> dict:
+    """QBO-shaped Balance Sheet for a manual company.
+
+    If the company was populated by a QBO → Manual import AND that QBO company
+    is still connected, we fetch the BS live from QBO (authoritative, balances).
+    Otherwise we reconstruct from Supabase transactions using double-entry sign
+    conventions — accurate only when opening balances are present in the data.
+    """
+    # Preferred path: delegate to QBO when the source company is known + connected.
+    if org_id:
+        src = await _find_qbo_source_for_manual(sb_company_id, org_id)
+        if src:
+            try:
+                db = get_db()
+                try:
+                    qbo_rpt = await qbo_get_report(
+                        db, src["id"], "BalanceSheet",
+                        {"end_date": as_of, "accounting_method": "Accrual"},
+                    )
+                finally:
+                    db.close()
+                if qbo_rpt and (qbo_rpt.get("Rows") or qbo_rpt.get("rows")):
+                    # Mark as QBO-sourced so the UI can show a hint if desired.
+                    hdr = qbo_rpt.setdefault("Header", {})
+                    hdr["Source"] = f"qbo:{src['name']}"
+                    hdr["EndPeriod"] = as_of
+                    return qbo_rpt
+            except Exception as e:
+                logger.warning("QBO BS fallback failed, using Supabase: %s", str(e)[:200])
+
+    # ---------- Supabase-reconstruction path (existing logic) -----------
     # Pull all non-transfer transactions up to as_of, paging through
     txs: list = []
     offset = 0
