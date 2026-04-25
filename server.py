@@ -3557,6 +3557,68 @@ async def create_ic_entry(req: ICEntryRequest, authorization: str = Header(None)
 # to write a balanced journal entry into a manual+Plaid company's Supabase
 # books. Lines: list of {posting_type, account_name, amount, description?}.
 # Returns (entry_id, error_string_or_none).
+async def _backfill_vendor_links(sb_company_id: str) -> dict:
+    """For QBO-imported transactions where merchant_name is set and vendor_id
+    is null, look up the vendor by display_name (case-insensitive) and set
+    vendor_id. Idempotent — only touches rows still missing the link.
+
+    Returns {'linked': N} so callers can report.
+    """
+    # Pull all vendors once
+    vendors = await _sb_select("vendors", {
+        "company_id": f"eq.{sb_company_id}",
+        "select": "id,display_name", "limit": "5000",
+    })
+    by_name = {(v.get("display_name") or "").strip().lower(): v["id"] for v in vendors if v.get("display_name")}
+    if not by_name:
+        return {"linked": 0, "scanned": 0}
+
+    # Pull unlinked QBO transactions in pages
+    candidates: list = []
+    offset = 0
+    while True:
+        chunk = await _sb_select("transactions", {
+            "company_id": f"eq.{sb_company_id}",
+            "vendor_id": "is.null",
+            "merchant_name": "not.is.null",
+            "categorized_by": "eq.qbo_import",
+            "select": "id,merchant_name",
+            "order": "id",
+            "limit": "1000", "offset": str(offset),
+        })
+        candidates.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
+
+    # Group by vendor_id so we can do bulk updates per vendor.
+    by_vendor: dict = {}
+    for t in candidates:
+        nm = (t.get("merchant_name") or "").strip().lower()
+        # Tolerate double-spaces ("Sweet Hut  Kitchen" → "Sweet Hut Kitchen")
+        nm_collapsed = " ".join(nm.split())
+        vid = by_name.get(nm) or by_name.get(nm_collapsed)
+        if vid:
+            by_vendor.setdefault(vid, []).append(t["id"])
+
+    linked = 0
+    for vid, tids in by_vendor.items():
+        # Chunked PATCH — Supabase URL length is the only practical limit
+        for i in range(0, len(tids), 200):
+            batch = tids[i:i + 200]
+            try:
+                await _sb_update(
+                    "transactions",
+                    {"id": f"in.({','.join(batch)})"},
+                    {"vendor_id": vid},
+                )
+                linked += len(batch)
+            except Exception as e:
+                logger.warning("Vendor link batch failed for vendor %s: %s",
+                               vid, str(e)[:200])
+    return {"linked": linked, "scanned": len(candidates)}
+
+
 async def _post_je_to_manual_company(sb_company_id, lines, txn_date, memo):
     coa = await _sb_select("chart_of_accounts", {
         "company_id": f"eq.{sb_company_id}",
@@ -9968,6 +10030,16 @@ async def import_qbo_ar_ap(
             await _sb_request("POST", "/bill_lines", json_body=line_rows, prefer="return=minimal")
         summary["bills"] += 1
 
+    # Now that vendors are upserted, link merchant_name → vendor_id on
+    # any QBO-imported transactions that were sitting around with the
+    # link blank. So clicking Transactions on a vendor row actually shows
+    # its history.
+    try:
+        link_result = await _backfill_vendor_links(sb_id)
+        summary["vendor_links_updated"] = link_result.get("linked", 0)
+    except Exception as e:
+        logger.warning("Vendor link pass failed: %s", str(e)[:200])
+
     return {
         "preview": False,
         "source_company": src_dict["name"],
@@ -9975,6 +10047,24 @@ async def import_qbo_ar_ap(
         **summary,
         "new_coa_count": len(created_accounts),
     }
+
+
+# Standalone endpoint to re-link vendors against existing transactions
+# (e.g., after manually creating a vendor with the same name as a merchant
+# already in the transactions table).
+class VendorLinkRequest(BaseModel):
+    company_id: str   # v2 manual company id
+
+
+@app.post("/api/import/relink-vendors")
+async def relink_vendors_endpoint(
+    body: VendorLinkRequest, authorization: str = Header(None),
+):
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    company = _get_manual_company_for_user(body.company_id, user)
+    result = await _backfill_vendor_links(company["supabase_company_id"])
+    return result
 
 
 # ---------- Payment match suggestions (M4) ----------
