@@ -3589,6 +3589,83 @@ async def post_ic_entry(entry_id: str, authorization: str = Header(None)):
             return row["qbo_account_id"], row["account_type"]
         return None, None
 
+    # --- Helper: get a company's source ('qbo' | 'manual') + supabase_company_id ---
+    def get_company_routing(company_id):
+        row = db.execute(
+            "SELECT source, supabase_company_id FROM companies WHERE id = ? AND org_id = ?",
+            (company_id, org_id),
+        ).fetchone()
+        return (row["source"], row["supabase_company_id"]) if row else (None, None)
+
+    # --- Helper: post one side as a Supabase journal entry (manual companies) ---
+    async def post_side_to_manual(sb_company_id, side_lines, txn_date, memo):
+        """Look up CoA accounts by name in Supabase, create journal_entries +
+        journal_lines rows. Returns (entry_id, error_string_or_none)."""
+        # Pull the company's CoA once
+        coa = await _sb_select("chart_of_accounts", {
+            "company_id": f"eq.{sb_company_id}",
+            "is_active": "eq.true",
+            "select": "id,name,code",
+            "limit": "2000",
+        })
+        by_name = {(c.get("name") or "").strip().lower(): c["id"] for c in coa}
+        # Also allow leaf-name fallback ("Sales:Wholesale" → "Wholesale")
+        by_leaf = {}
+        for c in coa:
+            nm = (c.get("name") or "").strip()
+            if ":" in nm:
+                leaf = nm.split(":")[-1].strip().lower()
+                by_leaf.setdefault(leaf, c["id"])
+        # Also allow "1000 Cash & Bank" style — split on first space
+        by_code = {(c.get("code") or "").strip(): c["id"] for c in coa if c.get("code")}
+
+        def resolve(name):
+            if not name: return None
+            n = name.strip()
+            return (by_name.get(n.lower())
+                    or by_leaf.get(n.lower())
+                    or by_code.get(n.split(" ", 1)[0]))
+
+        je_lines = []
+        missing = []
+        total_debit = 0.0
+        total_credit = 0.0
+        for sl in side_lines:
+            coa_id = resolve(sl["account_name"])
+            if not coa_id:
+                missing.append(sl["account_name"]); continue
+            amt = round(abs(float(sl["amount"] or 0)), 2)
+            if (sl["posting_type"] or "").lower() == "debit":
+                debit, credit = amt, 0.0; total_debit += amt
+            else:
+                debit, credit = 0.0, amt; total_credit += amt
+            je_lines.append({
+                "coa_account_id": coa_id,
+                "debit": debit, "credit": credit,
+                "description": sl.get("description") or memo,
+            })
+        if missing:
+            return None, f"account(s) not found in Supabase CoA: {', '.join(missing)}"
+        if not je_lines or abs(total_debit - total_credit) > 0.005:
+            return None, f"unbalanced ({total_debit:.2f} debit vs {total_credit:.2f} credit)"
+
+        entry = await _sb_insert("journal_entries", {
+            "company_id": sb_company_id,
+            "date": txn_date,
+            "memo": memo,
+            "created_by": SUPABASE_SYSTEM_USER_ID or None,
+        })
+        for ln in je_lines:
+            ln["journal_entry_id"] = entry["id"]
+        resp = await _sb_request(
+            "POST", "/journal_lines", json_body=je_lines,
+            prefer="return=representation",
+        )
+        if resp.status_code >= 300:
+            await _sb_delete("journal_entries", {"id": f"eq.{entry['id']}"})
+            return None, f"journal_lines insert failed ({resp.status_code})"
+        return entry["id"], None
+
     # --- Helper: build a single QBO JE line ---
     def build_je_line(posting_type, amount, account_ref, account_type, entity_id, description):
         detail = {
@@ -3629,9 +3706,27 @@ async def post_ic_entry(entry_id: str, authorization: str = Header(None)):
                 continue
 
         company_id = entry[company_id_key]
+        src, sb_company_id = get_company_routing(company_id)
+        memo_str = f"Intercompany: {entry['description'] or entry['entry_type']}"
+
+        # ---- Manual / Plaid company → write to Supabase journal_entries ----
+        if src == "manual" and sb_company_id:
+            try:
+                je_id, err = await post_side_to_manual(
+                    sb_company_id, side_lines, entry["date"], memo_str,
+                )
+                if err:
+                    errors.append(f"{side.capitalize()}: {err}")
+                else:
+                    if side == "source": source_je_id = je_id
+                    else: dest_je_id = je_id
+            except Exception as ex:
+                errors.append(f"{side.capitalize()} Supabase error: {str(ex)}")
+            continue
+
+        # ---- QBO company → existing path ----
         je_lines = []
         missing_accounts = []
-
         for sl in side_lines:
             acct_id, acct_type = find_account_info(company_id, sl["account_name"])
             if not acct_id:
@@ -3645,16 +3740,14 @@ async def post_ic_entry(entry_id: str, authorization: str = Header(None)):
         if missing_accounts:
             errors.append(f"{side.capitalize()}: account(s) not found: {', '.join(missing_accounts)}")
             continue
-
         if not je_lines:
             continue
 
         payload = {
             "TxnDate": entry["date"],
             "Line": je_lines,
-            "PrivateNote": f"Intercompany: {entry['description'] or entry['entry_type']}"
+            "PrivateNote": memo_str,
         }
-
         try:
             result = await qbo_api_call(
                 db, company_id,
@@ -3662,10 +3755,8 @@ async def post_ic_entry(entry_id: str, authorization: str = Header(None)):
                 method="POST", params=payload
             )
             je_id = result.get("JournalEntry", {}).get("Id")
-            if side == "source":
-                source_je_id = je_id
-            else:
-                dest_je_id = je_id
+            if side == "source": source_je_id = je_id
+            else: dest_je_id = je_id
         except HTTPException as he:
             errors.append(f"{side.capitalize()} QBO error: {he.detail}")
         except Exception as ex:
