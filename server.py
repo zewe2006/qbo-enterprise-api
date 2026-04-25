@@ -9761,12 +9761,21 @@ async def import_qbo_ar_ap(
                 qbo_cust_id_to_sb.setdefault(c["qbo_id"], c["id"])
 
     # ---- Vendors ----
+    # Use display_name as the conflict key (it's the existing unique
+    # constraint). qbo_id is set/updated on the merged row. Chunk so a
+    # single bad row in a 200-vendor batch doesn't lose them all.
     qbo_vend_id_to_sb: dict = {}
+    seen_names = set()
     vend_rows = []
     for v in qbo_vendors:
-        row = {
+        nm = (v.get("DisplayName") or v.get("CompanyName") or "Unnamed").strip()
+        # Dedupe within the batch on display_name (PostgREST 409s otherwise)
+        if nm.lower() in seen_names:
+            continue
+        seen_names.add(nm.lower())
+        vend_rows.append({
             "company_id": sb_id,
-            "display_name": (v.get("DisplayName") or v.get("CompanyName") or "Unnamed").strip(),
+            "display_name": nm,
             "company_name": v.get("CompanyName"),
             "email": _qbo_primary_email(v),
             "phone": _qbo_primary_phone(v),
@@ -9777,13 +9786,13 @@ async def import_qbo_ar_ap(
             "notes": v.get("Notes"),
             "is_active": bool(v.get("Active", True)),
             "qbo_id": v.get("Id"),
-        }
-        vend_rows.append(row)
-    if vend_rows:
+        })
+    for i in range(0, len(vend_rows), 50):
+        chunk = vend_rows[i:i + 50]
         resp = await _sb_request(
             "POST", "/vendors",
-            params={"on_conflict": "company_id,qbo_id"},
-            json_body=vend_rows,
+            params={"on_conflict": "company_id,display_name"},
+            json_body=chunk,
             prefer="return=representation,resolution=merge-duplicates",
         )
         if resp.status_code < 300:
@@ -9791,15 +9800,26 @@ async def import_qbo_ar_ap(
             for r in data:
                 if r.get("qbo_id"):
                     qbo_vend_id_to_sb[r["qbo_id"]] = r["id"]
-            summary["vendors"] = len(data)
-    if len(qbo_vend_id_to_sb) < len(qbo_vendors):
+            summary["vendors"] += len(data)
+        else:
+            logger.warning("Vendor upsert chunk %s failed %s: %s",
+                           i // 50, resp.status_code, resp.text[:300])
+    # Backfill from Supabase for anything not in the response (some merge
+    # paths don't echo the merged row).
+    if len(qbo_vend_id_to_sb) < len(vend_rows):
         all_v = await _sb_select("vendors", {
             "company_id": f"eq.{sb_id}",
-            "select": "id,qbo_id", "limit": "5000",
+            "select": "id,qbo_id,display_name", "limit": "5000",
         })
-        for v in all_v:
-            if v.get("qbo_id"):
-                qbo_vend_id_to_sb.setdefault(v["qbo_id"], v["id"])
+        by_name = {(v.get("display_name") or "").lower(): v for v in all_v}
+        for v in qbo_vendors:
+            qid = v.get("Id")
+            if not qid or qid in qbo_vend_id_to_sb:
+                continue
+            nm = (v.get("DisplayName") or v.get("CompanyName") or "Unnamed").strip().lower()
+            match = by_name.get(nm)
+            if match:
+                qbo_vend_id_to_sb[qid] = match["id"]
 
     # ---- helper to map a QBO line to a CoA / category ----
     def _line_coa_id(qbo_account_id: Optional[str]) -> Optional[str]:
