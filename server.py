@@ -3552,6 +3552,75 @@ async def create_ic_entry(req: ICEntryRequest, authorization: str = Header(None)
     db.close()
     return {"id": entry_id, "status": "pending"}
 
+
+# Shared helper used by /api/intercompany post + /api/delivery-import/export
+# to write a balanced journal entry into a manual+Plaid company's Supabase
+# books. Lines: list of {posting_type, account_name, amount, description?}.
+# Returns (entry_id, error_string_or_none).
+async def _post_je_to_manual_company(sb_company_id, lines, txn_date, memo):
+    coa = await _sb_select("chart_of_accounts", {
+        "company_id": f"eq.{sb_company_id}",
+        "is_active": "eq.true",
+        "select": "id,name,code",
+        "limit": "2000",
+    })
+    by_name = {(c.get("name") or "").strip().lower(): c["id"] for c in coa}
+    by_leaf = {}
+    for c in coa:
+        nm = (c.get("name") or "").strip()
+        if ":" in nm:
+            leaf = nm.split(":")[-1].strip().lower()
+            by_leaf.setdefault(leaf, c["id"])
+    by_code = {(c.get("code") or "").strip(): c["id"] for c in coa if c.get("code")}
+
+    def resolve(name):
+        if not name: return None
+        n = name.strip()
+        return (by_name.get(n.lower())
+                or by_leaf.get(n.lower())
+                or by_code.get(n.split(" ", 1)[0]))
+
+    je_lines = []
+    missing = []
+    total_debit = 0.0
+    total_credit = 0.0
+    for sl in lines:
+        coa_id = resolve(sl["account_name"])
+        if not coa_id:
+            missing.append(sl["account_name"]); continue
+        amt = round(abs(float(sl["amount"] or 0)), 2)
+        if (sl["posting_type"] or "").lower() == "debit":
+            debit, credit = amt, 0.0; total_debit += amt
+        else:
+            debit, credit = 0.0, amt; total_credit += amt
+        je_lines.append({
+            "coa_account_id": coa_id,
+            "debit": debit, "credit": credit,
+            "description": sl.get("description") or memo,
+        })
+    if missing:
+        return None, f"account(s) not found in Supabase CoA: {', '.join(missing)}"
+    if not je_lines or abs(total_debit - total_credit) > 0.005:
+        return None, f"unbalanced ({total_debit:.2f} debit vs {total_credit:.2f} credit)"
+
+    entry = await _sb_insert("journal_entries", {
+        "company_id": sb_company_id,
+        "date": txn_date,
+        "memo": memo,
+        "created_by": SUPABASE_SYSTEM_USER_ID or None,
+    })
+    for ln in je_lines:
+        ln["journal_entry_id"] = entry["id"]
+    resp = await _sb_request(
+        "POST", "/journal_lines", json_body=je_lines,
+        prefer="return=representation",
+    )
+    if resp.status_code >= 300:
+        await _sb_delete("journal_entries", {"id": f"eq.{entry['id']}"})
+        return None, f"journal_lines insert failed ({resp.status_code})"
+    return entry["id"], None
+
+
 @app.post("/api/intercompany/{entry_id}/post")
 async def post_ic_entry(entry_id: str, authorization: str = Header(None)):
     token = _extract_token(authorization)
@@ -3597,74 +3666,10 @@ async def post_ic_entry(entry_id: str, authorization: str = Header(None)):
         ).fetchone()
         return (row["source"], row["supabase_company_id"]) if row else (None, None)
 
-    # --- Helper: post one side as a Supabase journal entry (manual companies) ---
+    # Use the module-level helper (extracted so /api/delivery-import/export-qbo
+    # can post manual-side journal entries the same way).
     async def post_side_to_manual(sb_company_id, side_lines, txn_date, memo):
-        """Look up CoA accounts by name in Supabase, create journal_entries +
-        journal_lines rows. Returns (entry_id, error_string_or_none)."""
-        # Pull the company's CoA once
-        coa = await _sb_select("chart_of_accounts", {
-            "company_id": f"eq.{sb_company_id}",
-            "is_active": "eq.true",
-            "select": "id,name,code",
-            "limit": "2000",
-        })
-        by_name = {(c.get("name") or "").strip().lower(): c["id"] for c in coa}
-        # Also allow leaf-name fallback ("Sales:Wholesale" → "Wholesale")
-        by_leaf = {}
-        for c in coa:
-            nm = (c.get("name") or "").strip()
-            if ":" in nm:
-                leaf = nm.split(":")[-1].strip().lower()
-                by_leaf.setdefault(leaf, c["id"])
-        # Also allow "1000 Cash & Bank" style — split on first space
-        by_code = {(c.get("code") or "").strip(): c["id"] for c in coa if c.get("code")}
-
-        def resolve(name):
-            if not name: return None
-            n = name.strip()
-            return (by_name.get(n.lower())
-                    or by_leaf.get(n.lower())
-                    or by_code.get(n.split(" ", 1)[0]))
-
-        je_lines = []
-        missing = []
-        total_debit = 0.0
-        total_credit = 0.0
-        for sl in side_lines:
-            coa_id = resolve(sl["account_name"])
-            if not coa_id:
-                missing.append(sl["account_name"]); continue
-            amt = round(abs(float(sl["amount"] or 0)), 2)
-            if (sl["posting_type"] or "").lower() == "debit":
-                debit, credit = amt, 0.0; total_debit += amt
-            else:
-                debit, credit = 0.0, amt; total_credit += amt
-            je_lines.append({
-                "coa_account_id": coa_id,
-                "debit": debit, "credit": credit,
-                "description": sl.get("description") or memo,
-            })
-        if missing:
-            return None, f"account(s) not found in Supabase CoA: {', '.join(missing)}"
-        if not je_lines or abs(total_debit - total_credit) > 0.005:
-            return None, f"unbalanced ({total_debit:.2f} debit vs {total_credit:.2f} credit)"
-
-        entry = await _sb_insert("journal_entries", {
-            "company_id": sb_company_id,
-            "date": txn_date,
-            "memo": memo,
-            "created_by": SUPABASE_SYSTEM_USER_ID or None,
-        })
-        for ln in je_lines:
-            ln["journal_entry_id"] = entry["id"]
-        resp = await _sb_request(
-            "POST", "/journal_lines", json_body=je_lines,
-            prefer="return=representation",
-        )
-        if resp.status_code >= 300:
-            await _sb_delete("journal_entries", {"id": f"eq.{entry['id']}"})
-            return None, f"journal_lines insert failed ({resp.status_code})"
-        return entry["id"], None
+        return await _post_je_to_manual_company(sb_company_id, side_lines, txn_date, memo)
 
     # --- Helper: build a single QBO JE line ---
     def build_je_line(posting_type, amount, account_ref, account_type, entity_id, description):
@@ -5081,19 +5086,62 @@ async def export_delivery_to_qbo(
     posted_je_ids = []
     errors = []
 
+    # Detect target company source — manual companies post to Supabase
+    # journal_entries instead of QBO.
+    co_row = db.execute(
+        "SELECT source, supabase_company_id FROM companies WHERE id = ? AND org_id = ?",
+        (req.company_id, org_id),
+    ).fetchone()
+    company_source = co_row["source"] if co_row else None
+    sb_company_id = co_row["supabase_company_id"] if co_row else None
+
     for jno, group in je_groups.items():
+        # Parse the journal date to YYYY-MM-DD once per group
+        date_str = group["date"]
+        try:
+            dt = datetime.strptime(date_str, "%m/%d/%y")
+            iso_date = dt.strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            try:
+                dt = datetime.strptime(date_str.replace(",", ""), "%b %d %Y")
+                iso_date = dt.strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                iso_date = date_str
+        memo_str = f"{platform_label} Import: {jno} - {req.parsed.get('statement_period', '')}"
+
+        # ---- Manual / Plaid company → write to Supabase journal_entries ----
+        if company_source == "manual" and sb_company_id:
+            manual_lines = []
+            for line in group["lines"]:
+                amount = line["debit"] if line["debit"] else line["credit"]
+                manual_lines.append({
+                    "posting_type": "Debit" if line["debit"] else "Credit",
+                    "account_name": line["account"],
+                    "amount": float(amount or 0),
+                    "description": line.get("description", ""),
+                })
+            try:
+                je_id, err = await _post_je_to_manual_company(
+                    sb_company_id, manual_lines, iso_date, memo_str,
+                )
+                if err:
+                    errors.append(f"{jno}: {err}")
+                elif je_id:
+                    posted_je_ids.append({"journal_no": jno, "supabase_id": je_id})
+            except Exception as ex:
+                errors.append(f"{jno}: Supabase error - {str(ex)[:200]}")
+            continue
+
+        # ---- QBO company → existing path ----
         je_lines = []
         missing_accounts = []
-
         for line in group["lines"]:
             acct_id, acct_type = find_account_info(req.company_id, line["account"])
             if not acct_id:
                 missing_accounts.append(line["account"])
                 continue
-
             posting_type = "Debit" if line["debit"] else "Credit"
             amount = line["debit"] if line["debit"] else line["credit"]
-
             detail = {
                 "PostingType": posting_type,
                 "AccountRef": {"value": acct_id}
@@ -5108,28 +5156,14 @@ async def export_delivery_to_qbo(
         if missing_accounts:
             errors.append(f"{jno}: account(s) not found in QBO: {', '.join(missing_accounts)}")
             continue
-
         if not je_lines:
             continue
 
-        # Parse the journal date to QBO format (YYYY-MM-DD)
-        date_str = group["date"]
-        try:
-            dt = datetime.strptime(date_str, "%m/%d/%y")
-            qbo_date = dt.strftime("%Y-%m-%d")
-        except (ValueError, TypeError):
-            try:
-                dt = datetime.strptime(date_str.replace(",", ""), "%b %d %Y")
-                qbo_date = dt.strftime("%Y-%m-%d")
-            except (ValueError, TypeError):
-                qbo_date = date_str
-
         payload = {
-            "TxnDate": qbo_date,
+            "TxnDate": iso_date,
             "Line": je_lines,
-            "PrivateNote": f"{platform_label} Import: {jno} - {req.parsed.get('statement_period', '')}"
+            "PrivateNote": memo_str,
         }
-
         try:
             result = await qbo_api_call(
                 db, req.company_id,
