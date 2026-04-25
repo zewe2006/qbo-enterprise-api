@@ -4223,6 +4223,53 @@ async def get_journal_entry(
         raise HTTPException(status_code=502, detail=f"QBO error: {he.detail}")
 
 
+@app.delete("/api/companies/{company_id}/journal-entries/{je_id}")
+async def delete_journal_entry(
+    company_id: str,
+    je_id: str,
+    authorization: str = Header(None),
+):
+    """Delete (void) a QBO journal entry by Id. Two-step:
+      1. GET the JE to fetch its current SyncToken (QBO requires it).
+      2. POST /journalentry?operation=delete with {Id, SyncToken}.
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token)
+    org_id = get_org_id(user)
+    db = get_db()
+    company = db.execute(
+        "SELECT id FROM companies WHERE id = ? AND org_id = ?", (company_id, org_id),
+    ).fetchone()
+    if not company:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
+    try:
+        existing = await qbo_api_call(
+            db, company_id, f"journalentry/{je_id}?minorversion=65", method="GET",
+        )
+        je = existing.get("JournalEntry", existing) or {}
+        sync_token = je.get("SyncToken")
+        if sync_token is None:
+            db.close()
+            raise HTTPException(status_code=404, detail="Journal entry not found in QBO")
+        result = await qbo_api_call(
+            db, company_id,
+            "journalentry?operation=delete&minorversion=65",
+            method="POST",
+            params={"Id": je_id, "SyncToken": sync_token},
+        )
+        db.close()
+        return {
+            "deleted": True,
+            "qbo_id": je_id,
+            "status": (result.get("JournalEntry") or {}).get("status"),
+        }
+    except HTTPException as he:
+        db.close()
+        # Re-raise with detail context so the caller knows why it failed
+        raise HTTPException(status_code=502, detail=f"QBO delete failed: {he.detail}")
+
+
 # =====================================================================
 #  IC TEMPLATES
 # =====================================================================
