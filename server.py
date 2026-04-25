@@ -11487,6 +11487,18 @@ async def get_invoice(invoice_id: str, authorization: str = Header(None)):
     lines = await _sb_select("invoice_lines", {
         "invoice_id": f"eq.{invoice_id}", "select": "*", "order": "line_no.asc",
     })
+    coa_ids = list({l.get("coa_account_id") for l in lines if l.get("coa_account_id")})
+    if coa_ids:
+        coa_rows = await _sb_select("chart_of_accounts", {
+            "id": f"in.({','.join(coa_ids)})",
+            "select": "id,code,name",
+        })
+        coa_by_id = {c["id"]: c for c in coa_rows}
+        for l in lines:
+            c = coa_by_id.get(l.get("coa_account_id"))
+            if c:
+                l["account_name"] = c["name"]
+                l["account_code"] = c.get("code")
     cust = await _sb_select("customers", {
         "id": f"eq.{inv['customer_id']}", "select": "*", "limit": "1",
     })
@@ -11665,6 +11677,20 @@ async def get_bill(bill_id: str, authorization: str = Header(None)):
     lines = await _sb_select("bill_lines", {
         "bill_id": f"eq.{bill_id}", "select": "*", "order": "line_no.asc",
     })
+    # Hydrate each line with its CoA name + code so the detail modal can
+    # show the account / category instead of just an empty description.
+    coa_ids = list({l.get("coa_account_id") for l in lines if l.get("coa_account_id")})
+    if coa_ids:
+        coa_rows = await _sb_select("chart_of_accounts", {
+            "id": f"in.({','.join(coa_ids)})",
+            "select": "id,code,name",
+        })
+        coa_by_id = {c["id"]: c for c in coa_rows}
+        for l in lines:
+            c = coa_by_id.get(l.get("coa_account_id"))
+            if c:
+                l["account_name"] = c["name"]
+                l["account_code"] = c.get("code")
     vend = await _sb_select("vendors", {
         "id": f"eq.{bill['vendor_id']}", "select": "*", "limit": "1",
     })
