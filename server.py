@@ -6158,12 +6158,21 @@ def _apply_rule_to_tx(tx: dict, rule: dict) -> bool:
                 return False
         except Exception:
             return False
-    amt = abs(float(tx.get("amount") or 0))
+    raw_amt = float(tx.get("amount") or 0)
+    amt = abs(raw_amt)
     if match.get("min") is not None and amt < float(match["min"]):
         return False
     if match.get("max") is not None and amt > float(match["max"]):
         return False
     if match.get("account_id") and tx.get("account_id") != match["account_id"]:
+        return False
+    # Direction: "out" = Money Out (Plaid: amount > 0); "in" = Money In (amount < 0).
+    # Anything else = both. Lets users disambiguate "Paychex payroll outflow"
+    # from a "Paychex refund inflow" without writing a regex.
+    direction = match.get("direction")
+    if direction == "out" and raw_amt <= 0:
+        return False
+    if direction == "in" and raw_amt >= 0:
         return False
     return True
 
