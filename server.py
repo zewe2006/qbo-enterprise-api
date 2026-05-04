@@ -3770,6 +3770,7 @@ async def post_ic_entry(entry_id: str, authorization: str = Header(None)):
                      "amount": entry["amount"], "entity_id": entry.get("dest_credit_entity_id"), "description": entry["description"]},
                 ]
             else:
+                errors.append(f"{side.capitalize()}: no lines to post")
                 continue
 
         company_id = entry[company_id_key]
@@ -3808,6 +3809,7 @@ async def post_ic_entry(entry_id: str, authorization: str = Header(None)):
             errors.append(f"{side.capitalize()}: account(s) not found: {', '.join(missing_accounts)}")
             continue
         if not je_lines:
+            errors.append(f"{side.capitalize()}: no postable lines after account resolution")
             continue
 
         payload = {
@@ -3821,7 +3823,10 @@ async def post_ic_entry(entry_id: str, authorization: str = Header(None)):
                 "journalentry?minorversion=65",
                 method="POST", params=payload
             )
-            je_id = result.get("JournalEntry", {}).get("Id")
+            je_id = (result or {}).get("JournalEntry", {}).get("Id")
+            if not je_id:
+                errors.append(f"{side.capitalize()} QBO returned no JournalEntry.Id: {result}")
+                continue
             if side == "source": source_je_id = je_id
             else: dest_je_id = je_id
         except HTTPException as he:
@@ -3829,12 +3834,27 @@ async def post_ic_entry(entry_id: str, authorization: str = Header(None)):
         except Exception as ex:
             errors.append(f"{side.capitalize()} error: {str(ex)}")
 
-    # Update status based on results
-    if errors and not source_je_id and not dest_je_id:
+    # Both sides must have a je_id to count as posted
+    posted_sides = sum(1 for j in (source_je_id, dest_je_id) if j)
+    if posted_sides < 2:
+        new_status = "partial" if posted_sides == 1 else "failed"
+        db.execute(
+            "UPDATE intercompany_entries SET status = ?, source_je_id = ?, dest_je_id = ? WHERE id = ?",
+            (new_status, source_je_id, dest_je_id, entry_id),
+        )
+        db.commit()
         db.close()
-        raise HTTPException(status_code=400, detail="Failed to post: " + "; ".join(errors))
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": new_status,
+                "source_je_id": source_je_id,
+                "dest_je_id": dest_je_id,
+                "errors": errors or [f"No JE id returned for {'dest' if source_je_id else 'source'}"],
+            },
+        )
 
-    new_status = "posted" if not errors else "partial"
+    new_status = "posted"
     db.execute(
         "UPDATE intercompany_entries SET status = ?, source_je_id = ?, dest_je_id = ? WHERE id = ?",
         (new_status, source_je_id, dest_je_id, entry_id)
