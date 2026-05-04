@@ -4851,141 +4851,9 @@ def _parse_doordash_pdf(pdf_bytes: bytes) -> dict:
     }
 
 
-def _gh_money(s: str) -> float:
-    """Parse a Grubhub money token. ($X.XX) -> -X.XX, $X.XX -> X.XX, blank -> 0."""
-    s = s.strip()
-    neg = s.startswith("(") and s.endswith(")")
-    s = s.strip("()").replace("$", "").replace(",", "").replace(" ", "")
-    if not s:
-        return 0.0
-    try:
-        v = float(s)
-    except ValueError:
-        return 0.0
-    return -v if neg else v
-
-
-_GH_NUM_RE = r'\(?\s*-?\$?[\d,]+\.\d{2}\s*\)?'
-
-
-def _parse_grubhub_deposit(block: str) -> dict:
-    """Parse a single Grubhub deposit block into a payout dict."""
-    payout = {}
-
-    m = _re.search(r'Deposit\s+(\d{1,2}/\d{1,2}/\d{4})', block)
-    if m:
-        payout["deposit_date"] = m.group(1)
-    m = _re.search(r'Orders\s+(\d{1,2}/\d{1,2})\s+to\s+(\d{1,2}/\d{1,2})', block)
-    if m:
-        payout["period_start"] = m.group(1)
-        payout["period_end"] = m.group(2)
-    m = _re.search(r'\b([0-9a-zA-Z]{10,})\s+Account ending in\s+(\d+)', block)
-    if m:
-        payout["distribution_id"] = m.group(1)
-        payout["bank_acct_last4"] = m.group(2)
-
-    has_promotions = "Promotions" in block
-    has_fees_star = "Fees*" in block
-
-    # Total collected row carries deductions and the deposit amount.
-    # With promotions:    total, marketing, deliveries, withheld, promotions, processing, adjustments, pay_me
-    # Without promotions: total, marketing, deliveries, withheld, processing, adjustments, pay_me
-    tc = _re.search(r'Total collected\s+(.+)', block)
-    if not tc:
-        return None
-    amounts = [_gh_money(x) for x in _re.findall(_GH_NUM_RE, tc.group(1))]
-    if has_promotions and len(amounts) >= 8:
-        total_collected, marketing, deliveries, withheld, promotions, processing, adjustments, pay_me = amounts[:8]
-    elif len(amounts) >= 7:
-        total_collected, marketing, deliveries, withheld, processing, adjustments, pay_me = amounts[:7]
-        promotions = 0.0
-    else:
-        return None
-
-    payout["total_collected"] = round(abs(total_collected), 2)
-    payout["marketing_fee"] = round(abs(marketing), 2)
-    payout["delivery_fee"] = round(abs(deliveries), 2)
-    payout["withheld_sales_tax"] = round(abs(withheld), 2)
-    payout["promotions"] = round(abs(promotions), 2)
-    payout["processing_fee"] = round(abs(processing), 2)
-    payout["adjustments"] = round(abs(adjustments), 2)
-    payout["net_payout"] = round(abs(pay_me), 2)
-    payout["total_fees"] = round(
-        payout["marketing_fee"] + payout["delivery_fee"] + payout["processing_fee"], 2
-    )
-
-    # Sum subtotal/sales_tax/tip from per-order rows. Layouts (count, then amounts):
-    #   simple (no Delivery/Service/Cash/Promotions): 4 positives + 4 deductions
-    #   standard partner (no Cash):                   6 positives + 5 deductions
-    #   standard marketplace OR Fees*-partner:        7 positives + (4|5) deductions
-    #   Fees* marketplace:                            8 positives + 5 deductions
-    n_deductions = 5 if has_promotions else 4
-    sales = sales_tax = tips = 0.0
-    for row in _re.finditer(r'^(?:Marketplace order|Partner order)\s+\d+\s+(.+)$', block, _re.MULTILINE):
-        row_amts = [_gh_money(x) for x in _re.findall(_GH_NUM_RE, row.group(1))]
-        if len(row_amts) <= n_deductions:
-            continue
-        n_pos = len(row_amts) - n_deductions
-        sales += row_amts[0]
-        if n_pos == 4:                                # simple
-            sales_tax += row_amts[1]; tips += row_amts[2]
-        elif n_pos == 6:                              # standard partner
-            sales_tax += row_amts[3]; tips += row_amts[4]
-        elif n_pos == 7:
-            if has_fees_star:                         # Fees*-partner
-                sales_tax += row_amts[4]; tips += row_amts[5]
-            else:                                     # standard marketplace
-                sales_tax += row_amts[3]; tips += row_amts[4]
-        elif n_pos == 8:                              # Fees* marketplace
-            sales_tax += row_amts[4]; tips += row_amts[5]
-
-    payout["sales"] = round(sales, 2)
-    payout["sales_tax"] = round(sales_tax, 2)
-    payout["tips"] = round(tips, 2)
-    return payout
-
-
-def _parse_grubhub_pdf(pdf_bytes: bytes) -> dict:
-    """Parse a Grubhub monthly statement PDF into structured payout data."""
-    import pdfplumber
-    pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
-    full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-    pdf.close()
-
-    # Store name is in an "Account\n<name spans 1-2 lines> (#NNNNNN)" block on page 1.
-    store_name = ""
-    m = _re.search(r'Account\s*\n((?:[^\n]+\n?)+?)\s*\(#\d+\)', full_text)
-    if m:
-        store_name = " ".join(m.group(1).split())
-
-    period = ""
-    m = _re.search(r'For\s+(\d{1,2}/\d{1,2}/\d{4})\s+to\s+(\d{1,2}/\d{1,2}/\d{4})', full_text)
-    if m:
-        period = f"{m.group(1)} to {m.group(2)}"
-
-    # Split into per-deposit blocks via lookahead so each block keeps its "Deposit M/D/YYYY" header.
-    blocks = _re.split(r'(?=Deposit\s+\d{1,2}/\d{1,2}/\d{4})', full_text)
-    payouts = []
-    for block in blocks:
-        if not _re.match(r'\s*Deposit\s+\d{1,2}/\d{1,2}/\d{4}', block):
-            continue
-        p = _parse_grubhub_deposit(block)
-        if p and p.get("net_payout"):
-            payouts.append(p)
-
-    return {
-        "platform": "grubhub",
-        "store_name": store_name,
-        "statement_period": period,
-        "payouts": payouts,
-    }
-
-
 def _detect_platform(text: str) -> str:
-    """Detect whether a PDF is from Uber Eats, DoorDash, or Grubhub."""
+    """Detect whether a PDF is from Uber Eats or DoorDash."""
     text_lower = text.lower()
-    if "grubhub" in text_lower or "seamless marketplace" in text_lower:
-        return "grubhub"
     if "uber eats" in text_lower or "marketplace fees" in text_lower and "uber" in text_lower:
         return "ubereats"
     if "doordash" in text_lower or "dasher" in text_lower:
@@ -5004,31 +4872,21 @@ def _generate_journal_entries(parsed: dict, mapping: dict, prefix: str = "UBER")
     Returns list of dicts with: journal_no, journal_date, account, debit, credit, description
     """
     entries = []
-    platform_label = (
-        "Uber Eats" if parsed["platform"] == "ubereats"
-        else "Grubhub" if parsed["platform"] == "grubhub"
-        else "DoorDash"
-    )
+    platform_label = "Uber Eats" if parsed["platform"] == "ubereats" else "DoorDash"
 
     for idx, payout in enumerate(parsed["payouts"], 1):
         journal_no = f"{prefix}-{idx}"
-        # Parse deposit date — Uber/DoorDash use "Apr 8 2026", Grubhub uses "4/8/2026"
+        # Parse deposit date
         date_str = payout.get("deposit_date", "")
-        formatted_date = date_str
-        for fmt in ("%b %d %Y", "%m/%d/%Y"):
-            try:
-                dt = datetime.strptime(date_str.replace(",", ""), fmt)
-                formatted_date = dt.strftime("%-m/%-d/%y")
-                break
-            except (ValueError, TypeError):
-                continue
+        try:
+            dt = datetime.strptime(date_str.replace(",", ""), "%b %d %Y")
+            formatted_date = dt.strftime("%-m/%-d/%y")
+        except (ValueError, TypeError):
+            formatted_date = date_str
 
         period_desc = ""
         if payout.get("period_start") and payout.get("period_end"):
             period_desc = f"{payout['period_start']} - {payout['period_end']}"
-        if parsed["platform"] == "grubhub" and payout.get("distribution_id"):
-            dist = payout["distribution_id"]
-            period_desc = f"{period_desc} (Distribution {dist})".strip() if period_desc else f"Distribution {dist}"
 
         # DEBIT: Bank account (net payout)
         if payout.get("net_payout", 0) > 0:
@@ -5045,8 +4903,6 @@ def _generate_journal_entries(parsed: dict, mapping: dict, prefix: str = "UBER")
         fee_amount = 0
         if parsed["platform"] == "ubereats":
             fee_amount = payout.get("total_uber_fees", 0)
-        elif parsed["platform"] == "grubhub":
-            fee_amount = payout.get("total_fees", 0)
         else:
             fee_amount = payout.get("total_commission_fees", 0)
         if fee_amount > 0:
@@ -5059,11 +4915,8 @@ def _generate_journal_entries(parsed: dict, mapping: dict, prefix: str = "UBER")
                 "description": f"{platform_label} Marketplace Fees",
             })
 
-        # DEBIT: Marketing — Uber/DD use total_marketing; Grubhub treats restaurant-funded promos as marketing
-        if parsed["platform"] == "grubhub":
-            mkt_amount = payout.get("promotions", 0)
-        else:
-            mkt_amount = payout.get("total_marketing", 0)
+        # DEBIT: Marketing
+        mkt_amount = payout.get("total_marketing", 0)
         if mkt_amount > 0:
             entries.append({
                 "journal_no": journal_no,
@@ -5159,13 +5012,11 @@ async def parse_delivery_statement(
 
     platform = _detect_platform(first_page_text)
     if platform == "unknown":
-        raise HTTPException(status_code=400, detail="Could not detect platform. Please upload an Uber Eats, DoorDash, or Grubhub monthly statement.")
+        raise HTTPException(status_code=400, detail="Could not detect platform. Please upload an Uber Eats or DoorDash monthly statement.")
 
     try:
         if platform == "ubereats":
             parsed = _parse_ubereats_pdf(pdf_bytes)
-        elif platform == "grubhub":
-            parsed = _parse_grubhub_pdf(pdf_bytes)
         else:
             parsed = _parse_doordash_pdf(pdf_bytes)
     except Exception as e:
