@@ -43,6 +43,7 @@ logging.basicConfig(
 logger = logging.getLogger("consolidatedreport")
 
 import httpx
+import pos_import
 from fastapi import FastAPI, HTTPException, Header, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -6487,6 +6488,132 @@ async def _sb_rpc(fn_name: str, args: dict) -> any:
         return resp.json()
     except Exception:
         return resp.text
+
+
+# ============================================================
+#   Ordyx / Tonic POS — Daily Sales import (logic in pos_import.py)
+# ============================================================
+
+class _PosSB:
+    """Adapter exposing the async select/insert/delete/update/rpc surface that
+    pos_import.run_pos_sync expects, backed by the service-role Supabase REST
+    helpers above."""
+    async def select(self, table, params):
+        return await _sb_select(table, params)
+
+    async def insert(self, table, row):
+        resp = await _sb_request("POST", f"/{table}", json_body=row, prefer="return=representation")
+        if resp.status_code >= 300:
+            logger.error("Supabase insert %s failed %s: %s", table, resp.status_code, resp.text[:500])
+            raise HTTPException(status_code=502, detail=f"Supabase insert {table} failed ({resp.status_code})")
+        data = resp.json()
+        if isinstance(row, list):
+            return data
+        return data[0] if isinstance(data, list) and data else data
+
+    async def delete(self, table, params):
+        resp = await _sb_request("DELETE", f"/{table}", params=params)
+        if resp.status_code >= 300:
+            raise HTTPException(status_code=502, detail=f"Supabase delete {table} failed ({resp.status_code})")
+
+    async def update(self, table, match, patch):
+        resp = await _sb_request("PATCH", f"/{table}", params=match, json_body=patch)
+        if resp.status_code >= 300:
+            raise HTTPException(status_code=502, detail=f"Supabase update {table} failed ({resp.status_code})")
+
+    async def rpc(self, fn, args):
+        return await _sb_rpc(fn, args)
+
+
+class POSConnectRequest(BaseModel):
+    company_id: str
+    store_id: int
+    api_key: Optional[str] = None
+    payment_type_map: Optional[dict] = None
+    bucket_account_map: Optional[dict] = None
+
+
+class POSSyncRequest(BaseModel):
+    company_id: str
+    mode: str = "next"
+    batch_number: Optional[int] = None
+    max_batches: Optional[int] = None
+    from_date: Optional[str] = None
+    dry_run: bool = True
+    acknowledge: bool = False
+
+
+def _pos_resolve_company(req_company_id: str, org_id: str):
+    """Map the frontend company id to (source, supabase_company_id), scoped to
+    the caller's org. Daily Sales import targets manual/Plaid (Supabase) companies."""
+    db = get_db()
+    co = db.execute(
+        "SELECT source, supabase_company_id FROM companies WHERE id = ? AND org_id = ?",
+        (req_company_id, org_id),
+    ).fetchone()
+    db.close()
+    if not co:
+        raise HTTPException(status_code=404, detail="Company not found")
+    sb_id = co["supabase_company_id"] or req_company_id
+    return co["source"], sb_id
+
+
+@app.post("/api/pos/connect")
+async def pos_connect(req: POSConnectRequest, authorization: str = Header(None)):
+    user = get_current_user(_extract_token(authorization))
+    org_id = get_org_id(user)
+    _source, sb_company_id = _pos_resolve_company(req.company_id, org_id)
+
+    existing = await _sb_select("pos_connections", {
+        "company_id": f"eq.{sb_company_id}", "provider": "eq.ordyx",
+        "store_id": f"eq.{req.store_id}", "select": "id", "limit": "1",
+    })
+    patch = {"status": "connected"}
+    if req.api_key:
+        patch["api_key"] = req.api_key  # encrypted by the pos_connections trigger
+    if req.payment_type_map is not None:
+        patch["payment_type_map"] = req.payment_type_map
+    if req.bucket_account_map is not None:
+        patch["bucket_account_map"] = req.bucket_account_map
+
+    if existing:
+        resp = await _sb_request("PATCH", "/pos_connections",
+                                 params={"id": f"eq.{existing[0]['id']}"}, json_body=patch)
+        if resp.status_code >= 300:
+            raise HTTPException(status_code=502, detail=f"Supabase update failed ({resp.status_code})")
+        return {"ok": True, "id": existing[0]["id"], "updated": True}
+
+    if not req.api_key:
+        raise HTTPException(status_code=400, detail="api_key required to create a connection")
+    created = await _sb_insert("pos_connections", {
+        "company_id": sb_company_id, "provider": "ordyx", "store_id": req.store_id, **patch,
+    })
+    return {"ok": True, "id": created["id"], "created": True}
+
+
+@app.post("/api/pos/sync")
+async def pos_sync(req: POSSyncRequest, authorization: str = Header(None)):
+    user = get_current_user(_extract_token(authorization))
+    org_id = get_org_id(user)
+    source, sb_company_id = _pos_resolve_company(req.company_id, org_id)
+    if source != "manual":
+        raise HTTPException(status_code=400, detail="Daily Sales import is only available for manual / Plaid companies")
+    try:
+        result = await pos_import.run_pos_sync(
+            _PosSB(),
+            {
+                "companyId": sb_company_id, "mode": req.mode, "batchNumber": req.batch_number,
+                "maxBatches": req.max_batches, "fromDate": req.from_date,
+                "dryRun": req.dry_run, "acknowledge": req.acknowledge,
+            },
+            created_by=(SUPABASE_SYSTEM_USER_ID or None),
+            system_user_id=(SUPABASE_SYSTEM_USER_ID or None),
+        )
+        return {"ok": True, **result}
+    except pos_import.OrdyxError as e:
+        raise HTTPException(status_code=502, detail=f"Ordyx API error: {e}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ---------- Plaid HTTP client (thin wrapper over REST) ----------
